@@ -7,13 +7,19 @@ import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Color;
+import android.graphics.PixelFormat;
 import android.graphics.Typeface;
+import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.ParcelFileDescriptor;
+import android.provider.Settings;
 import android.text.InputType;
+import android.view.Gravity;
+import android.view.View;
 import android.view.ViewGroup;
+import android.view.WindowManager;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
@@ -21,6 +27,7 @@ import android.widget.RadioButton;
 import android.widget.RadioGroup;
 import android.widget.ScrollView;
 import android.widget.TextView;
+import android.widget.Toast;
 
 import org.w3c.dom.Document;
 import org.w3c.dom.Element;
@@ -68,6 +75,11 @@ public class MainActivity extends Activity {
     private TextView logView;
     private Button applyBtn;
     private Button calibBtn;
+    private Toast currentToast;
+    private TextView overlayView;
+    private WindowManager overlayWm;
+    private volatile boolean overlayAllowed = false;
+    private volatile String lastResult = "Done";
     private final Handler ui = new Handler(Looper.getMainLooper());
     private volatile boolean busy = false;
 
@@ -158,6 +170,12 @@ public class MainActivity extends Activity {
         applyIntent(intent);
     }
 
+    @Override
+    protected void onDestroy() {
+        hideOverlay();
+        super.onDestroy();
+    }
+
     private void applyIntent(Intent it) {
         if (it == null) return;
         String hx = it.getStringExtra("hex");
@@ -215,16 +233,20 @@ public class MainActivity extends Activity {
         busy = true;
         applyBtn.setEnabled(false);
         calibBtn.setEnabled(false);
-        log("=== Apply " + h + " to " + (fill ? "Fill" : "Arrow") + " ===");
+        step("Applying " + h + " to " + (fill ? "Fill" : "Arrow") + "\u2026");
+        lastResult = "Done \u2014 " + h + " applied";
 
         new Thread(() -> {
             try {
                 runFlow(h, fill);
             } catch (Throwable t) {
                 log("ERROR: " + t);
+                lastResult = "Failed: " + t.getMessage();
                 StackTraceElement[] st = t.getStackTrace();
                 for (int i = 0; i < Math.min(4, st.length); i++) log("  at " + st[i]);
             } finally {
+                focusApp();
+                finishOverlay(lastResult);
                 busy = false;
                 ui.post(() -> {
                     applyBtn.setEnabled(true);
@@ -240,16 +262,20 @@ public class MainActivity extends Activity {
         busy = true;
         applyBtn.setEnabled(false);
         calibBtn.setEnabled(false);
-        log("=== Calibration (this device) ===");
+        step("Calibrating this device\u2026");
+        lastResult = "Calibration done";
 
         new Thread(() -> {
             try {
                 runCalibration();
             } catch (Throwable t) {
                 log("CALIBRATION ERROR: " + t);
+                lastResult = "Calibration failed: " + t.getMessage();
                 StackTraceElement[] st = t.getStackTrace();
                 for (int i = 0; i < Math.min(4, st.length); i++) log("  at " + st[i]);
             } finally {
+                focusApp();
+                finishOverlay(lastResult);
                 busy = false;
                 ui.post(() -> {
                     applyBtn.setEnabled(true);
@@ -481,6 +507,8 @@ public class MainActivity extends Activity {
         if (Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED)
             throw new Exception("Shizuku permission not granted");
 
+        prepareOverlay();
+
         int[] rgb = parseHex(hex);
         float[] hsv = rgbToHsv(rgb[0], rgb[1], rgb[2]);
         int vpct = pickVpct(rgb[0], rgb[1], rgb[2]);
@@ -496,14 +524,14 @@ public class MainActivity extends Activity {
         if (lock.contains("true")) log("WARNING: screen appears locked");
 
         // 1. launch OHO+ main
-        log("1) launch OHO+");
+        step("Opening OHO+\u2026");
         sh("am start -W -n " + ACT_MAIN + " --activity-clear-top");
         if (!waitForActivity(ACT_MAIN.substring(ACT_MAIN.indexOf('/') + 1), 6000))
             log("  warning: main activity not focused yet");
         sleep(700);
 
         // 2. Advanced settings
-        log("2) Advanced settings");
+        step("Navigating to Advanced settings\u2026");
         List<Nd> ui = dumpUi();
         Nd adv = byId(ui, "detail_setting");
         if (adv == null) throw new Exception("'Advanced settings' row not found");
@@ -512,7 +540,7 @@ public class MainActivity extends Activity {
         sleep(600);
 
         // 3. Animation row (tap title, left of the switch)
-        log("3) Animation");
+        step("Opening Animation settings\u2026");
         ui = dumpUi();
         Nd anim = byId(ui, "arrow_animation");
         if (anim == null) throw new Exception("'Animation' row not found");
@@ -524,7 +552,7 @@ public class MainActivity extends Activity {
         sleep(600);
 
         // 4. Fill / Arrow colour row
-        log("4) " + (fill ? "Fill" : "Arrow") + " color row");
+        step("Opening " + (fill ? "Fill" : "Arrow") + " color picker\u2026");
         ui = dumpUi();
         Nd row = byId(ui, fill ? "fill_color" : "arrow_color");
         if (row == null) throw new Exception("colour row not found");
@@ -546,6 +574,7 @@ public class MainActivity extends Activity {
                 if (tab == null) tab = byText(ui, "SPECTRUM");
                 if (tab != null) {
                     log("5) switch to Spectrum tab");
+                    status("Selecting Spectrum\u2026");
                     tap(tab.cx(), tab.cy());
                     sleep(600);
                     ui = dumpUi();
@@ -566,6 +595,8 @@ public class MainActivity extends Activity {
 
             double x = xH0 + (H / 360.0) * (xH1 - xH0) + corrX;
             double y = yS0 + S * (yS1 - yS0) + corrY;
+
+            status("Picking color\u2026");
 
             // 6. iterate on hue / saturation using the brightness bar readback
             for (int it = 0; it < 4; it++) {
@@ -594,6 +625,7 @@ public class MainActivity extends Activity {
             int cy = sb.cy();
             int targetX = sb.l + Math.round((sb.r - sb.l) * (vpct / 100f));
             log("7) brightness " + vpct + "% -> x=" + targetX);
+            status("Setting brightness " + vpct + "%\u2026");
             swipe(sb.r - 6, cy, targetX, cy, 450);
             sleep(400);
 
@@ -605,7 +637,7 @@ public class MainActivity extends Activity {
             if (done2 != null) done = done2;
 
             // 8. Done
-            log("8) Done");
+            step("Saving color\u2026");
             tap(done.cx(), done.cy());
             if (!waitForActivity(ACT_ANIM, 6000)) log("  warning: did not return to animation screen");
             sleep(700);
@@ -620,9 +652,11 @@ public class MainActivity extends Activity {
                     Math.max(Math.abs(got[1] - rgb[1]), Math.abs(got[2] - rgb[2])));
             if (diff <= 1) {
                 log("SUCCESS (max diff " + diff + ", picker limit)");
+                lastResult = "Done \u2014 " + hex + " applied";
                 return;
             }
             log("  mismatch (max diff " + diff + "), retrying");
+            status("Almost there \u2014 adjusting\u2026");
 
             // correct using achieved vs target hue/saturation
             float[] gotHsv = rgbToHsv(got[0], got[1], got[2]);
@@ -698,10 +732,12 @@ public class MainActivity extends Activity {
         if (Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED)
             throw new Exception("Shizuku permission not granted");
 
+        prepareOverlay();
+
         try { sh("input keyevent KEYCODE_WAKEUP"); } catch (Exception ignored) {}
 
         // --- navigate: OHO+ main -> Advanced -> Animation -> Fill color -> picker
-        log("1) navigate to picker");
+        step("Opening OHO+\u2026");
         sh("am start -W -n " + ACT_MAIN + " --activity-clear-top");
         waitForActivity(ACT_MAIN.substring(ACT_MAIN.indexOf('/') + 1), 6000);
         sleep(700);
@@ -709,6 +745,7 @@ public class MainActivity extends Activity {
         List<Nd> ui = dumpUi();
         Nd adv = byId(ui, "detail_setting");
         if (adv == null) throw new Exception("'Advanced settings' row not found");
+        status("Navigating to Advanced settings\u2026");
         tap(adv.cx(), adv.cy());
         waitForActivity(ACT_ADV, 6000);
         sleep(600);
@@ -719,6 +756,7 @@ public class MainActivity extends Activity {
         Nd sw = byId(ui, "main_switch");
         int ax = anim.l + (int) (anim.w() * 0.35);
         if (sw != null && ax > sw.l - 40) ax = sw.l - 80;
+        status("Opening Animation settings\u2026");
         tap(ax, anim.cy());
         waitForActivity(ACT_ANIM, 6000);
         sleep(600);
@@ -726,6 +764,7 @@ public class MainActivity extends Activity {
         ui = dumpUi();
         Nd row = byId(ui, "fill_color");
         if (row == null) throw new Exception("'Fill color' row not found");
+        status("Opening color picker\u2026");
         tap(row.cx(), row.cy());
         waitForActivity(ACT_PICK, 6000);
         sleep(700);
@@ -735,6 +774,7 @@ public class MainActivity extends Activity {
             Nd tab = byText(ui, "Spectrum");
             if (tab == null) tab = byText(ui, "SPECTRUM");
             if (tab == null) throw new Exception("Spectrum tab not found");
+            status("Selecting Spectrum\u2026");
             tap(tab.cx(), tab.cy());
             sleep(600);
             ui = dumpUi();
@@ -751,7 +791,7 @@ public class MainActivity extends Activity {
         double xA = cont.l + 0.25 * cont.w();
         double xB = cont.l + 0.75 * cont.w();
 
-        log("2) hue probes");
+        step("Calibrating hue\u2026");
         float[] pA = probe(xA, yHigh, sb);
         float[] pB = probe(xB, yHigh, sb);
         log(String.format(Locale.US, "   x=%.0f -> H=%.2f S=%.3f", xA, pA[0], pA[1]));
@@ -772,7 +812,7 @@ public class MainActivity extends Activity {
         double yA = cont.t + 0.25 * cont.h();
         double yB = cont.t + 0.75 * cont.h();
 
-        log("3) saturation probes");
+        step("Calibrating saturation\u2026");
         float[] sA = probe(xMid, yA, sb);
         float[] sB = probe(xMid, yB, sb);
         log(String.format(Locale.US, "   y=%.0f -> S=%.3f", yA, sA[1]));
@@ -796,7 +836,7 @@ public class MainActivity extends Activity {
             throw new Exception("hue range too small");
 
         // --- verification at a known point
-        log("4) verification");
+        step("Verifying calibration\u2026");
         double vx = xH0 + (90.0 / 360.0) * (xH1 - xH0);
         double vy = yS0 + 0.5 * (yS1 - yS0);
         float[] v = probe(vx, vy, sb);
@@ -819,6 +859,8 @@ public class MainActivity extends Activity {
 
         if (Math.abs(dH) > 10 || Math.abs(dS) > 0.06) {
             log("Calibration FAILED verification - not saved. Keep the screen still and retry.");
+            lastResult = "Calibration failed \u2014 retry";
+            status(lastResult);
             return;
         }
 
@@ -830,6 +872,8 @@ public class MainActivity extends Activity {
                 String.format(Locale.US, "dH=%.2f dS=%.3f", dH, dS));
         log(String.format(Locale.US,
                 "SAVED: H[%.4f..%.4f] S[%.4f..%.4f]", hx0, hx1, sy0, sy1));
+        lastResult = "Calibration saved";
+        status(lastResult);
     }
 
     private static double clamp(double v, double lo, double hi) {
@@ -866,6 +910,126 @@ public class MainActivity extends Activity {
     }
 
     // =====================================================================
+    /** Show a short message over whatever app is on screen (also logged). */
+    private void toast(String msg) {
+        ui.post(() -> {
+            try {
+                if (currentToast != null) currentToast.cancel();
+                currentToast = Toast.makeText(this, msg, Toast.LENGTH_SHORT);
+                currentToast.show();
+            } catch (Throwable ignored) {
+            }
+        });
+    }
+
+    /**
+     * Ask Shizuku to allow the overlay permission, then check it. Called on the
+     * worker thread before a flow starts. Toasts from a background app are
+     * suppressed by Android, so the live progress is drawn as an overlay window.
+     */
+    private void prepareOverlay() {
+        try {
+            if (!Settings.canDrawOverlays(this)) {
+                sh("appops set " + getPackageName() + " SYSTEM_ALERT_WINDOW allow");
+                sleep(400);
+            }
+        } catch (Throwable t) {
+            log("overlay grant failed: " + t);
+        }
+        overlayAllowed = Settings.canDrawOverlays(this);
+        log("overlay allowed: " + overlayAllowed);
+    }
+
+    /** Update the floating progress pill; falls back to a toast if not allowed. */
+    private void showOverlay(String msg) {
+        if (!overlayAllowed) {
+            toast(msg);
+            return;
+        }
+        ui.post(() -> {
+            try {
+                if (overlayView == null) {
+                    TextView tv = new TextView(this);
+                    tv.setTextSize(15);
+                    tv.setTextColor(Color.WHITE);
+                    tv.setPadding(48, 20, 48, 20);
+                    tv.setGravity(Gravity.CENTER);
+                    GradientDrawable bg = new GradientDrawable();
+                    bg.setColor(0xE6000000);
+                    bg.setCornerRadius(60);
+                    bg.setStroke(2, 0x66FFFFFF);
+                    tv.setBackground(bg);
+
+                    WindowManager wm = (WindowManager) getSystemService(WINDOW_SERVICE);
+                    WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
+                            WindowManager.LayoutParams.WRAP_CONTENT,
+                            WindowManager.LayoutParams.WRAP_CONTENT,
+                            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                                    | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
+                            PixelFormat.TRANSLUCENT);
+                    lp.gravity = Gravity.TOP | Gravity.CENTER_HORIZONTAL;
+                    lp.y = 90;
+                    wm.addView(tv, lp);
+                    overlayView = tv;
+                    overlayWm = wm;
+                }
+                overlayView.setText(msg);
+                overlayView.setVisibility(View.VISIBLE);
+            } catch (Throwable t) {
+                log("overlay error: " + t);
+                toast(msg);
+            }
+        });
+    }
+
+    private void hideOverlay() {
+        ui.post(() -> {
+            try {
+                if (overlayView != null && overlayWm != null) overlayWm.removeView(overlayView);
+            } catch (Throwable ignored) {
+            }
+            overlayView = null;
+            overlayWm = null;
+        });
+    }
+
+    /** A user-facing step: written to the log and shown on the overlay. */
+    private void step(String msg) {
+        log(msg);
+        showOverlay(msg);
+    }
+
+    /** Transient status on the overlay, without a log line. */
+    private void status(String msg) {
+        showOverlay(msg);
+    }
+
+    /** Show the final result briefly, then remove the overlay. */
+    private void finishOverlay(String msg) {
+        showOverlay(msg);
+        ui.postDelayed(this::hideOverlay, 1800);
+    }
+
+    /** Bring this app back to the foreground after driving another app. */
+    private void focusApp() {
+        try {
+            sh("am start -n " + getPackageName() + "/.MainActivity --activity-reorder-to-front");
+            log("focused app");
+        } catch (Throwable t) {
+            log("could not focus app: " + t);
+            ui.post(() -> {
+                try {
+                    Intent i = new Intent(this, MainActivity.class);
+                    i.addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT | Intent.FLAG_ACTIVITY_NEW_TASK);
+                    startActivity(i);
+                } catch (Throwable t2) {
+                    log("focus fallback failed: " + t2);
+                }
+            });
+        }
+    }
+
     private void log(String s) {
         ui.post(() -> {
             logView.append(s + "\n");
