@@ -6,6 +6,7 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.content.res.ColorStateList;
+import android.content.res.Resources;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
@@ -115,7 +116,6 @@ public class MainActivity extends Activity {
     private ColorSection fillSection, arrowSection;
     private volatile boolean materialFillOk = false, materialArrowOk = false;
     private volatile int materialFill = 0, materialArrow = 0;
-    private volatile boolean materialFetching = false;
     private int materialRetry = 0;
     private volatile int lastSwatchDiff = 999;
 
@@ -750,106 +750,76 @@ public class MainActivity extends Activity {
                 .putBoolean(key + "_material", material).apply();
     }
 
-    /** Loads both Material You palettes and the two colours we apply. */
-    private void fetchThemeData() {
-        if (materialFetching) return;
-        materialFetching = true;
-        new Thread(() -> {
-            Palette dark = null, light = null;
-            boolean fillOk = false, arrowOk = false;
-            int fill = 0, arrow = 0;
-            try {
-                if (!waitForShizuku(6000)) {
-                    log("Theme: Shizuku not running");
-                } else if (Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED) {
-                    log("Theme: Shizuku permission not granted");
-                } else {
-                    String[] roles = {
-                            "primary", "on_primary", "primary_container", "on_primary_container",
-                            "secondary_container", "on_secondary_container",
-                            "surface", "on_surface", "surface_container", "surface_container_high",
-                            "surface_container_highest", "surface_variant", "on_surface_variant",
-                            "outline", "outline_variant", "error", "on_error"
-                    };
-                    StringBuilder cmd = new StringBuilder();
-                    for (String r : roles) {
-                        cmd.append("echo D_").append(r)
-                                .append("=$(cmd overlay lookup --user 0 android android:color/system_")
-                                .append(r).append("_dark)\n");
-                        cmd.append("echo L_").append(r)
-                                .append("=$(cmd overlay lookup --user 0 android android:color/system_")
-                                .append(r).append("_light)\n");
-                    }
-                    cmd.append("echo D_FILL=$(cmd overlay lookup --user 0 android android:color/system_secondary_container_dark)\n");
-                    cmd.append("echo D_ARROW=$(cmd overlay lookup --user 0 android android:color/system_on_secondary_container_dark)\n");
-                    String out = sh(cmd.toString());
-                    java.util.HashMap<String, String> map = new java.util.HashMap<>();
-                    for (String line : out.split("\\r?\\n")) {
-                        int eq = line.indexOf('=');
-                        if (eq > 0) {
-                            map.put(line.substring(0, eq).trim(), line.substring(eq + 1).trim());
-                        }
-                    }
-                    dark = new Palette(true);
-                    light = new Palette(false);
-                    fillPalette(dark, map, "D_");
-                    fillPalette(light, map, "L_");
-                    Integer f = parseMaterialColor(map.get("D_FILL"));
-                    Integer a = parseMaterialColor(map.get("D_ARROW"));
-                    if (f != null && a != null) {
-                        fill = f;
-                        arrow = a;
-                        fillOk = true;
-                        arrowOk = true;
-                    } else {
-                        log("Theme: fill/arrow lookup failed, using fallback");
-                    }
-                }
-            } catch (Throwable t) {
-                log("Theme lookup failed: " + t);
-            }
-            if (dark == null) dark = Palette.fallback(true);
-            if (light == null) light = Palette.fallback(false);
-            if (!fillOk) { fill = dark.secondaryContainer; fillOk = true; }
-            if (!arrowOk) { arrow = dark.onSecondaryContainer; arrowOk = true; }
-            paletteDark = dark;
-            paletteLight = light;
-            materialFill = fill;
-            materialArrow = arrow;
-            materialFillOk = fillOk;
-            materialArrowOk = arrowOk;
-            materialRetry = 0;
-            themeLoaded = true;
-            materialFetching = false;
-            log("Theme loaded: fill=" + colorToHex(fill) + " arrow=" + colorToHex(arrow));
-            ui.post(this::buildMainUi);
-        }).start();
+    /**
+     * Reads the Material You role colours from the framework itself. These are the
+     * public android.R.color.system_* resources (API 31+), so no Shizuku/ADB lookup is
+     * needed — the gate and the main UI can use the real palette immediately.
+     */
+    private void loadSystemPalettes() {
+        Palette fbD = Palette.fallback(true);
+        Palette fbL = Palette.fallback(false);
+        if (Build.VERSION.SDK_INT >= 31) {
+            Palette d = new Palette(true);
+            d.primary = sysColor(android.R.color.system_primary_dark, fbD.primary);
+            d.onPrimary = sysColor(android.R.color.system_on_primary_dark, fbD.onPrimary);
+            d.primaryContainer = sysColor(android.R.color.system_primary_container_dark, fbD.primaryContainer);
+            d.onPrimaryContainer = sysColor(android.R.color.system_on_primary_container_dark, fbD.onPrimaryContainer);
+            d.secondaryContainer = sysColor(android.R.color.system_secondary_container_dark, fbD.secondaryContainer);
+            d.onSecondaryContainer = sysColor(android.R.color.system_on_secondary_container_dark, fbD.onSecondaryContainer);
+            d.surface = sysColor(android.R.color.system_surface_dark, fbD.surface);
+            d.onSurface = sysColor(android.R.color.system_on_surface_dark, fbD.onSurface);
+            d.surfaceContainer = sysColor(android.R.color.system_surface_container_dark, fbD.surfaceContainer);
+            d.surfaceContainerHigh = sysColor(android.R.color.system_surface_container_high_dark, fbD.surfaceContainerHigh);
+            d.surfaceContainerHighest = sysColor(android.R.color.system_surface_container_highest_dark, fbD.surfaceContainerHighest);
+            d.surfaceVariant = sysColor(android.R.color.system_surface_variant_dark, fbD.surfaceVariant);
+            d.onSurfaceVariant = sysColor(android.R.color.system_on_surface_variant_dark, fbD.onSurfaceVariant);
+            d.outline = sysColor(android.R.color.system_outline_dark, fbD.outline);
+            d.outlineVariant = sysColor(android.R.color.system_outline_variant_dark, fbD.outlineVariant);
+            d.error = sysColor(android.R.color.system_error_dark, fbD.error);
+            d.onError = sysColor(android.R.color.system_on_error_dark, fbD.onError);
+
+            Palette l = new Palette(false);
+            l.primary = sysColor(android.R.color.system_primary_light, fbL.primary);
+            l.onPrimary = sysColor(android.R.color.system_on_primary_light, fbL.onPrimary);
+            l.primaryContainer = sysColor(android.R.color.system_primary_container_light, fbL.primaryContainer);
+            l.onPrimaryContainer = sysColor(android.R.color.system_on_primary_container_light, fbL.onPrimaryContainer);
+            l.secondaryContainer = sysColor(android.R.color.system_secondary_container_light, fbL.secondaryContainer);
+            l.onSecondaryContainer = sysColor(android.R.color.system_on_secondary_container_light, fbL.onSecondaryContainer);
+            l.surface = sysColor(android.R.color.system_surface_light, fbL.surface);
+            l.onSurface = sysColor(android.R.color.system_on_surface_light, fbL.onSurface);
+            l.surfaceContainer = sysColor(android.R.color.system_surface_container_light, fbL.surfaceContainer);
+            l.surfaceContainerHigh = sysColor(android.R.color.system_surface_container_high_light, fbL.surfaceContainerHigh);
+            l.surfaceContainerHighest = sysColor(android.R.color.system_surface_container_highest_light, fbL.surfaceContainerHighest);
+            l.surfaceVariant = sysColor(android.R.color.system_surface_variant_light, fbL.surfaceVariant);
+            l.onSurfaceVariant = sysColor(android.R.color.system_on_surface_variant_light, fbL.onSurfaceVariant);
+            l.outline = sysColor(android.R.color.system_outline_light, fbL.outline);
+            l.outlineVariant = sysColor(android.R.color.system_outline_variant_light, fbL.outlineVariant);
+            l.error = sysColor(android.R.color.system_error_light, fbL.error);
+            l.onError = sysColor(android.R.color.system_on_error_light, fbL.onError);
+
+            paletteDark = d;
+            paletteLight = l;
+        } else {
+            paletteDark = fbD;
+            paletteLight = fbL;
+        }
+        materialFill = paletteDark.secondaryContainer;
+        materialArrow = paletteDark.onSecondaryContainer;
+        materialFillOk = true;
+        materialArrowOk = true;
+        materialRetry = 0;
+        themeLoaded = true;
+        log("Theme loaded: fill=" + colorToHex(materialFill)
+                + " arrow=" + colorToHex(materialArrow));
     }
 
-    private void fillPalette(Palette p, java.util.HashMap<String, String> map, String prefix) {
-        Palette fb = Palette.fallback(p.dark);
-        p.primary = colorOr(map, prefix + "primary", fb.primary);
-        p.onPrimary = colorOr(map, prefix + "on_primary", fb.onPrimary);
-        p.primaryContainer = colorOr(map, prefix + "primary_container", fb.primaryContainer);
-        p.onPrimaryContainer = colorOr(map, prefix + "on_primary_container", fb.onPrimaryContainer);
-        p.secondaryContainer = colorOr(map, prefix + "secondary_container", fb.secondaryContainer);
-        p.onSecondaryContainer = colorOr(map, prefix + "on_secondary_container", fb.onSecondaryContainer);
-        p.surface = colorOr(map, prefix + "surface", fb.surface);
-        p.onSurface = colorOr(map, prefix + "on_surface", fb.onSurface);
-        p.surfaceContainer = colorOr(map, prefix + "surface_container", fb.surfaceContainer);
-        p.surfaceContainerHigh = colorOr(map, prefix + "surface_container_high", fb.surfaceContainerHigh);
-        p.surfaceContainerHighest = colorOr(map, prefix + "surface_container_highest", fb.surfaceContainerHighest);
-        p.surfaceVariant = colorOr(map, prefix + "surface_variant", fb.surfaceVariant);
-        p.onSurfaceVariant = colorOr(map, prefix + "on_surface_variant", fb.onSurfaceVariant);
-        p.outline = colorOr(map, prefix + "outline", fb.outline);
-        p.outlineVariant = colorOr(map, prefix + "outline_variant", fb.outlineVariant);
-        p.error = colorOr(map, prefix + "error", fb.error);
-        p.onError = colorOr(map, prefix + "on_error", fb.onError);
-    }
-
-    private static int colorOr(java.util.HashMap<String, String> map, String key, int fallback) {
-        Integer c = parseMaterialColor(map.get(key));
-        return c != null ? c : fallback;
+    private int sysColor(int resId, int fallback) {
+        try {
+            // Use the activity's Resources so the Material You runtime overlay is applied.
+            return 0xFF000000 | (getResources().getColor(resId, getTheme()) & 0xFFFFFF);
+        } catch (Throwable t) {
+            return fallback;
+        }
     }
 
     private static Integer parseMaterialColor(String s) {
@@ -890,7 +860,9 @@ public class MainActivity extends Activity {
         super.onCreate(b);
         loadSpeed();
         loadDarkMode();
-        pal = Palette.fallback(darkMode);
+        loadSystemPalettes();
+        pal = darkMode ? paletteDark : paletteLight;
+        if (pal == null) pal = Palette.fallback(darkMode);
         applyPaletteToWindow();
 
         try {
@@ -945,12 +917,7 @@ public class MainActivity extends Activity {
         boolean running = safePingBool();
         boolean granted = running && safeGranted();
         if (granted) {
-            if (!themeLoaded) {
-                if (!loadingShowing) showLoading();
-                fetchThemeData();
-            } else if (!mainShowing) {
-                buildMainUi();
-            }
+            if (!mainShowing) buildMainUi();
         } else {
             String key = isShizukuInstalled() + "|" + running + "|" + granted;
             if (!gateShowing || !key.equals(lastGateKey)) {
