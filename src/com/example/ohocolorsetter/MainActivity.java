@@ -2,6 +2,7 @@ package com.example.ohocolorsetter;
 
 import android.app.Activity;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
@@ -52,13 +53,21 @@ public class MainActivity extends Activity {
     static final String ACT_PICK = "SGPColorPickerActivity";
 
     // ---- spectrum square calibration (fractions of the spectrum container) ----
-    static final double XH0 = 0.1253, XH1 = 0.8901;
-    static final double YS0 = 0.0533, YS1 = 0.9378;
+    // Defaults were measured on a Galaxy A55 (One UI 8). Tap "Calibrate" on any
+    // other device to replace them; the result is stored in SharedPreferences.
+    static final double DEF_XH0 = 0.1253, DEF_XH1 = 0.8901;
+    static final double DEF_YS0 = 0.0533, DEF_YS1 = 0.9378;
+    static final String PREFS = "oho_calib";
+
+    private double calXH0 = DEF_XH0, calXH1 = DEF_XH1;
+    private double calYS0 = DEF_YS0, calYS1 = DEF_YS1;
+    private boolean calibrated = false;
 
     private EditText hexInput;
     private RadioGroup targetGroup;
     private TextView logView;
     private Button applyBtn;
+    private Button calibBtn;
     private final Handler ui = new Handler(Looper.getMainLooper());
     private volatile boolean busy = false;
 
@@ -108,6 +117,11 @@ public class MainActivity extends Activity {
         applyBtn.setOnClickListener(v -> startApply());
         root.addView(applyBtn);
 
+        calibBtn = new Button(this);
+        calibBtn.setText("Calibrate (this device)");
+        calibBtn.setOnClickListener(v -> startCalibration());
+        root.addView(calibBtn);
+
         Button perm = new Button(this);
         perm.setText("Grant Shizuku permission");
         perm.setOnClickListener(v -> requestPerm());
@@ -132,6 +146,7 @@ public class MainActivity extends Activity {
         }
 
         log("Ready. Shizuku running: " + safePing());
+        loadCalibration();
 
         applyIntent(getIntent());
     }
@@ -154,7 +169,9 @@ public class MainActivity extends Activity {
         if ("arrow".equalsIgnoreCase(tg)) targetGroup.check(1002);
         else if ("fill".equalsIgnoreCase(tg)) targetGroup.check(1001);
 
-        if (it.getBooleanExtra("auto", false)) {
+        if (it.getBooleanExtra("calibrate", false)) {
+            hexInput.postDelayed(this::startCalibration, 900);
+        } else if (it.getBooleanExtra("auto", false)) {
             hexInput.postDelayed(this::startApply, 900);
         }
     }
@@ -197,6 +214,7 @@ public class MainActivity extends Activity {
 
         busy = true;
         applyBtn.setEnabled(false);
+        calibBtn.setEnabled(false);
         log("=== Apply " + h + " to " + (fill ? "Fill" : "Arrow") + " ===");
 
         new Thread(() -> {
@@ -208,8 +226,36 @@ public class MainActivity extends Activity {
                 for (int i = 0; i < Math.min(4, st.length); i++) log("  at " + st[i]);
             } finally {
                 busy = false;
-                ui.post(() -> applyBtn.setEnabled(true));
+                ui.post(() -> {
+                    applyBtn.setEnabled(true);
+                    calibBtn.setEnabled(true);
+                });
                 log("=== done ===");
+            }
+        }).start();
+    }
+
+    private void startCalibration() {
+        if (busy) return;
+        busy = true;
+        applyBtn.setEnabled(false);
+        calibBtn.setEnabled(false);
+        log("=== Calibration (this device) ===");
+
+        new Thread(() -> {
+            try {
+                runCalibration();
+            } catch (Throwable t) {
+                log("CALIBRATION ERROR: " + t);
+                StackTraceElement[] st = t.getStackTrace();
+                for (int i = 0; i < Math.min(4, st.length); i++) log("  at " + st[i]);
+            } finally {
+                busy = false;
+                ui.post(() -> {
+                    applyBtn.setEnabled(true);
+                    calibBtn.setEnabled(true);
+                });
+                log("=== calibration finished ===");
             }
         }).start();
     }
@@ -419,8 +465,19 @@ public class MainActivity extends Activity {
     // =====================================================================
     // Main flow
     // =====================================================================
+    private boolean waitForShizuku(long timeoutMs) {
+        long end = System.currentTimeMillis() + timeoutMs;
+        while (System.currentTimeMillis() < end) {
+            try {
+                if (Shizuku.pingBinder()) return true;
+            } catch (Throwable ignored) {}
+            sleep(100);
+        }
+        return false;
+    }
+
     private void runFlow(String hex, boolean fill) throws Exception {
-        if (!Shizuku.pingBinder()) throw new Exception("Shizuku is not running");
+        if (!waitForShizuku(3000)) throw new Exception("Shizuku is not running");
         if (Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED)
             throw new Exception("Shizuku permission not granted");
 
@@ -502,10 +559,10 @@ public class MainActivity extends Activity {
             if (sb == null) throw new Exception("brightness seekbar not found");
             if (done == null) throw new Exception("Done button not found");
 
-            double xH0 = cont.l + XH0 * cont.w();
-            double xH1 = cont.l + XH1 * cont.w();
-            double yS0 = cont.t + YS0 * cont.h();
-            double yS1 = cont.t + YS1 * cont.h();
+            double xH0 = cont.l + calXH0 * cont.w();
+            double xH1 = cont.l + calXH1 * cont.w();
+            double yS0 = cont.t + calYS0 * cont.h();
+            double yS1 = cont.t + calYS1 * cont.h();
 
             double x = xH0 + (H / 360.0) * (xH1 - xH0) + corrX;
             double y = yS0 + S * (yS1 - yS0) + corrY;
@@ -590,12 +647,198 @@ public class MainActivity extends Activity {
                 (got == null ? "null" : got[0] + "," + got[1] + "," + got[2]) + ")");
     }
 
+    // =====================================================================
+    // Calibration
+    // =====================================================================
+    private void loadCalibration() {
+        SharedPreferences sp = getSharedPreferences(PREFS, MODE_PRIVATE);
+        calibrated = sp.getBoolean("valid", false);
+        calXH0 = sp.getFloat("hx0", (float) DEF_XH0);
+        calXH1 = sp.getFloat("hx1", (float) DEF_XH1);
+        calYS0 = sp.getFloat("sy0", (float) DEF_YS0);
+        calYS1 = sp.getFloat("sy1", (float) DEF_YS1);
+        if (calibrated) {
+            log(String.format(Locale.US,
+                    "Calibration loaded: H[%.4f..%.4f] S[%.4f..%.4f] (%s)",
+                    calXH0, calXH1, calYS0, calYS1, sp.getString("model", "?")));
+        } else {
+            log("No calibration yet - using built-in defaults (tap Calibrate).");
+        }
+    }
+
+    private void saveCalibration(double hx0, double hx1, double sy0, double sy1, String note) {
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                .putBoolean("valid", true)
+                .putFloat("hx0", (float) hx0)
+                .putFloat("hx1", (float) hx1)
+                .putFloat("sy0", (float) sy0)
+                .putFloat("sy1", (float) sy1)
+                .putString("model", android.os.Build.MODEL)
+                .putString("note", note)
+                .putLong("time", System.currentTimeMillis())
+                .apply();
+        calXH0 = hx0;
+        calXH1 = hx1;
+        calYS0 = sy0;
+        calYS1 = sy1;
+        calibrated = true;
+    }
+
+    /** Tap a point in the spectrum square and read H/S back from the brightness bar. */
+    private float[] probe(double x, double y, Nd sb) throws Exception {
+        tap((int) Math.round(x), (int) Math.round(y));
+        sleep(450);
+        Bitmap shot = screenshot();
+        int px = shot.getPixel(Math.max(0, sb.r - 6), sb.cy());
+        return rgbToHsv(Color.red(px), Color.green(px), Color.blue(px));
+    }
+
+    private void runCalibration() throws Exception {
+        if (!waitForShizuku(3000)) throw new Exception("Shizuku is not running");
+        if (Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED)
+            throw new Exception("Shizuku permission not granted");
+
+        try { sh("input keyevent KEYCODE_WAKEUP"); } catch (Exception ignored) {}
+
+        // --- navigate: OHO+ main -> Advanced -> Animation -> Fill color -> picker
+        log("1) navigate to picker");
+        sh("am start -W -n " + ACT_MAIN + " --activity-clear-top");
+        waitForActivity(ACT_MAIN.substring(ACT_MAIN.indexOf('/') + 1), 6000);
+        sleep(700);
+
+        List<Nd> ui = dumpUi();
+        Nd adv = byId(ui, "detail_setting");
+        if (adv == null) throw new Exception("'Advanced settings' row not found");
+        tap(adv.cx(), adv.cy());
+        waitForActivity(ACT_ADV, 6000);
+        sleep(600);
+
+        ui = dumpUi();
+        Nd anim = byId(ui, "arrow_animation");
+        if (anim == null) throw new Exception("'Animation' row not found");
+        Nd sw = byId(ui, "main_switch");
+        int ax = anim.l + (int) (anim.w() * 0.35);
+        if (sw != null && ax > sw.l - 40) ax = sw.l - 80;
+        tap(ax, anim.cy());
+        waitForActivity(ACT_ANIM, 6000);
+        sleep(600);
+
+        ui = dumpUi();
+        Nd row = byId(ui, "fill_color");
+        if (row == null) throw new Exception("'Fill color' row not found");
+        tap(row.cx(), row.cy());
+        waitForActivity(ACT_PICK, 6000);
+        sleep(700);
+
+        ui = dumpUi();
+        if (byId(ui, "sesl_color_picker_color_spectrum_view_container") == null) {
+            Nd tab = byText(ui, "Spectrum");
+            if (tab == null) tab = byText(ui, "SPECTRUM");
+            if (tab == null) throw new Exception("Spectrum tab not found");
+            tap(tab.cx(), tab.cy());
+            sleep(600);
+            ui = dumpUi();
+        }
+
+        Nd cont = byId(ui, "sesl_color_picker_color_spectrum_view_container");
+        Nd sb = byId(ui, "sesl_color_picker_saturation_seekbar");
+        Nd cancel = byId(ui, "button2");
+        if (cont == null) throw new Exception("spectrum container not found");
+        if (sb == null) throw new Exception("brightness seekbar not found");
+
+        // --- hue probes (high saturation gives an accurate hue readback)
+        double yHigh = cont.t + 0.80 * cont.h();
+        double xA = cont.l + 0.25 * cont.w();
+        double xB = cont.l + 0.75 * cont.w();
+
+        log("2) hue probes");
+        float[] pA = probe(xA, yHigh, sb);
+        float[] pB = probe(xB, yHigh, sb);
+        log(String.format(Locale.US, "   x=%.0f -> H=%.2f S=%.3f", xA, pA[0], pA[1]));
+        log(String.format(Locale.US, "   x=%.0f -> H=%.2f S=%.3f", xB, pB[0], pB[1]));
+
+        double hA = pA[0], hB = pB[0];
+        if (hB < hA) hB += 360;                 // unwrap past 360
+        double aH = (hB - hA) / (xB - xA);
+        double bH = hA - aH * xA;
+        if (!(aH > 0.05)) throw new Exception("bad hue slope: " + aH);
+        double xH0 = (0 - bH) / aH;
+        double xH1 = (360 - bH) / aH;
+        log(String.format(Locale.US, "   H(x)=%.5f*x%+.2f  H0@%.1f  H360@%.1f",
+                aH, bH, xH0, xH1));
+
+        // --- saturation probes (hue does not matter for S)
+        double xMid = cont.l + 0.50 * cont.w();
+        double yA = cont.t + 0.25 * cont.h();
+        double yB = cont.t + 0.75 * cont.h();
+
+        log("3) saturation probes");
+        float[] sA = probe(xMid, yA, sb);
+        float[] sB = probe(xMid, yB, sb);
+        log(String.format(Locale.US, "   y=%.0f -> S=%.3f", yA, sA[1]));
+        log(String.format(Locale.US, "   y=%.0f -> S=%.3f", yB, sB[1]));
+
+        double aS = (sB[1] - sA[1]) / (yB - yA);
+        double bS = sA[1] - aS * yA;
+        if (!(aS > 0.0001)) throw new Exception("bad saturation slope: " + aS);
+        double yS0 = (0 - bS) / aS;
+        double yS1 = (1 - bS) / aS;
+        log(String.format(Locale.US, "   S(y)=%.6f*y%+.4f  S0@%.1f  S1@%.1f",
+                aS, bS, yS0, yS1));
+
+        // --- sanity: the derived range must be near the container
+        double marginX = cont.w() * 0.15, marginY = cont.h() * 0.15;
+        if (xH0 < cont.l - marginX || xH1 > cont.r + marginX)
+            throw new Exception("hue range outside container");
+        if (yS0 < cont.t - marginY || yS1 > cont.b + marginY)
+            throw new Exception("saturation range outside container");
+        if (xH1 - xH0 < cont.w() * 0.3)
+            throw new Exception("hue range too small");
+
+        // --- verification at a known point
+        log("4) verification");
+        double vx = xH0 + (90.0 / 360.0) * (xH1 - xH0);
+        double vy = yS0 + 0.5 * (yS1 - yS0);
+        float[] v = probe(vx, vy, sb);
+        float dH = 90f - v[0];
+        if (dH > 180) dH -= 360;
+        if (dH < -180) dH += 360;
+        float dS = 0.5f - v[1];
+        log(String.format(Locale.US,
+                "   target H=90 S=0.5 -> H=%.2f S=%.3f (dH=%.2f dS=%.3f)",
+                v[0], v[1], dH, dS));
+
+        // --- discard the temporary colour
+        if (cancel != null) {
+            tap(cancel.cx(), cancel.cy());
+        } else {
+            sh("input keyevent 4");
+        }
+        waitForActivity(ACT_ANIM, 5000);
+        sleep(400);
+
+        if (Math.abs(dH) > 10 || Math.abs(dS) > 0.06) {
+            log("Calibration FAILED verification - not saved. Keep the screen still and retry.");
+            return;
+        }
+
+        double hx0 = (xH0 - cont.l) / cont.w();
+        double hx1 = (xH1 - cont.l) / cont.w();
+        double sy0 = (yS0 - cont.t) / cont.h();
+        double sy1 = (yS1 - cont.t) / cont.h();
+        saveCalibration(hx0, hx1, sy0, sy1,
+                String.format(Locale.US, "dH=%.2f dS=%.3f", dH, dS));
+        log(String.format(Locale.US,
+                "SAVED: H[%.4f..%.4f] S[%.4f..%.4f]", hx0, hx1, sy0, sy1));
+    }
+
     private static double clamp(double v, double lo, double hi) {
         return v < lo ? lo : (v > hi ? hi : v);
     }
 
     private int[] sampleSwatch(Bitmap bmp, Nd row) {
-        int x = row.l + 85;
+        // the swatch circle sits ~59% of the row height in from the left edge
+        int x = row.l + Math.max(24, (int) (row.h() * 0.59));
         int y = row.cy();
         int c = bmp.getPixel(x, y);
         int[] px = {Color.red(c), Color.green(c), Color.blue(c)};
@@ -603,8 +846,9 @@ public class MainActivity extends Activity {
         if (px[0] < 60 && px[1] < 60 && px[2] < 60) {
             int bestScore = -1;
             int[] best = px;
+            int xEnd = row.l + Math.max(140, (int) (row.w() * 0.30));
             for (int yy = row.t + 10; yy < row.b - 10; yy += 4) {
-                for (int xx = row.l + 30; xx < row.l + 200; xx += 4) {
+                for (int xx = row.l + 10; xx < xEnd; xx += 4) {
                     int cc = bmp.getPixel(xx, yy);
                     int r = Color.red(cc), g = Color.green(cc), b = Color.blue(cc);
                     int mx = Math.max(r, Math.max(g, b));
