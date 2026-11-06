@@ -1,0 +1,13 @@
+# Build output
+build/
+
+# APK signature files (v4)
+*.idsig
+
+# Local SDK configuration
+local.properties
+
+# IDE files
+.idea/
+*.iml
+.vscode/
