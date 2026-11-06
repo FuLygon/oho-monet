@@ -1,28 +1,47 @@
-package com.example.ohocolorsetter;
+package com.fgn.ohomonet;
 
 import android.app.Activity;
+import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
+import android.content.res.ColorStateList;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
+import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.Paint;
+import android.graphics.Path;
 import android.graphics.PixelFormat;
+import android.graphics.RectF;
 import android.graphics.Typeface;
+import android.graphics.drawable.ColorDrawable;
+import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.RippleDrawable;
+import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.ParcelFileDescriptor;
 import android.provider.Settings;
+import android.text.Editable;
 import android.text.InputType;
+import android.text.TextWatcher;
 import android.view.Gravity;
+import android.view.KeyEvent;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.WindowInsets;
+import android.view.WindowInsetsController;
 import android.view.WindowManager;
-import android.widget.Button;
+import android.view.inputmethod.EditorInfo;
+import android.view.inputmethod.InputMethodManager;
 import android.widget.EditText;
+import android.widget.FrameLayout;
 import android.widget.LinearLayout;
+import android.widget.ProgressBar;
 import android.widget.RadioButton;
 import android.widget.RadioGroup;
 import android.widget.ScrollView;
@@ -76,8 +95,8 @@ public class MainActivity extends Activity {
     private boolean calibrated = false;
 
     private TextView logView;
-    private Button applyBtn;
-    private Button calibBtn;
+    private TextView applyBtn;
+    private TextView calibBtn;
     private Toast currentToast;
     private TextView overlayView;
     private WindowManager overlayWm;
@@ -88,7 +107,6 @@ public class MainActivity extends Activity {
     private volatile boolean busy = false;
 
     private SeekBar speedBar;
-    private TextView speedLabel;
     private volatile int speed = SPEED_NORMAL;      // user setting (apply flow)
     private volatile int flowSpeed = SPEED_NORMAL;  // snapshot used by the running flow
     private volatile boolean speedHint = false;
@@ -101,71 +119,617 @@ public class MainActivity extends Activity {
     private int materialRetry = 0;
     private volatile int lastSwatchDiff = 999;
 
-    static class ColorSection {
-        RadioGroup modeGroup;
-        EditText input;
-        TextView materialView;
-        View swatch;
-        volatile boolean materialMode = true;
-        String key;
+    // ---- theme / screens ----
+    private boolean darkMode = true;
+    private Palette pal = Palette.fallback(true);
+    private Palette paletteDark, paletteLight;
+    private boolean themeLoaded = false;
+    private boolean gateShowing = false;
+    private boolean mainShowing = false;
+    private boolean loadingShowing = false;
+    private String lastGateKey = "";
+    private int selectedTab = 0;
+    private final StringBuilder logBuffer = new StringBuilder();
+    private TextView tabFill, tabArrow;
+    private FrameLayout tabContent;
+    private ThemeToggleView themeToggleView;
+    private Intent pendingIntent;
+
+    static class Palette {
+        final boolean dark;
+        int primary, onPrimary, primaryContainer, onPrimaryContainer;
+        int secondaryContainer, onSecondaryContainer;
+        int surface, onSurface, surfaceContainer, surfaceContainerHigh, surfaceContainerHighest;
+        int surfaceVariant, onSurfaceVariant;
+        int outline, outlineVariant;
+        int error, onError;
+
+        Palette(boolean dark) { this.dark = dark; }
+
+        static Palette fallback(boolean dark) {
+            Palette p = new Palette(dark);
+            if (dark) {
+                p.primary = 0xFFA8C7FA;
+                p.onPrimary = 0xFF00315F;
+                p.primaryContainer = 0xFF0842A0;
+                p.onPrimaryContainer = 0xFFD3E3FD;
+                p.secondaryContainer = 0xFF3B4866;
+                p.onSecondaryContainer = 0xFFD7E3FF;
+                p.surface = 0xFF111318;
+                p.onSurface = 0xFFE2E2E9;
+                p.surfaceContainer = 0xFF1D2024;
+                p.surfaceContainerHigh = 0xFF282A2F;
+                p.surfaceContainerHighest = 0xFF33353A;
+                p.surfaceVariant = 0xFF44474E;
+                p.onSurfaceVariant = 0xFFC4C6D0;
+                p.outline = 0xFF8E9099;
+                p.outlineVariant = 0xFF44474E;
+                p.error = 0xFFFFB4AB;
+                p.onError = 0xFF690005;
+            } else {
+                p.primary = 0xFF0B57D0;
+                p.onPrimary = 0xFFFFFFFF;
+                p.primaryContainer = 0xFFD3E3FD;
+                p.onPrimaryContainer = 0xFF041E49;
+                p.secondaryContainer = 0xFFD7E3FF;
+                p.onSecondaryContainer = 0xFF001B3F;
+                p.surface = 0xFFF8F9FF;
+                p.onSurface = 0xFF1A1C1E;
+                p.surfaceContainer = 0xFFEEF0F6;
+                p.surfaceContainerHigh = 0xFFE3E5EB;
+                p.surfaceContainerHighest = 0xFFD8DAE0;
+                p.surfaceVariant = 0xFFE1E2EC;
+                p.onSurfaceVariant = 0xFF44474E;
+                p.outline = 0xFF74777F;
+                p.outlineVariant = 0xFFC4C6D0;
+                p.error = 0xFFBA1A1A;
+                p.onError = 0xFFFFFFFF;
+            }
+            return p;
+        }
     }
 
-    private int dp(int v) {
+    static class ColorSection {
+        String key, label;
+        RadioGroup modeGroup;
+        RadioButton materialRadio, customRadio;
+        EditText input;
+        ColorPreviewView preview;
+        View card;
+        int materialId, customId;
+        volatile boolean materialMode = true;
+        int customColor = 0xFF000000;
+        int materialColor = 0;
+        boolean materialOk = false;
+        boolean inputError = false;
+        boolean suppressFocusCommit = false;
+    }
+
+    static int dpStatic(Context c, float v) {
+        return Math.round(v * c.getResources().getDisplayMetrics().density);
+    }
+
+    static int withAlpha(int color, float alpha) {
+        int a = Math.round(255 * Math.max(0f, Math.min(1f, alpha)));
+        return (color & 0x00FFFFFF) | (a << 24);
+    }
+
+    static int blend(int a, int b, float t) {
+        t = Math.max(0f, Math.min(1f, t));
+        int ar = (a >> 16) & 0xFF, ag = (a >> 8) & 0xFF, ab = a & 0xFF;
+        int br = (b >> 16) & 0xFF, bg = (b >> 8) & 0xFF, bb = b & 0xFF;
+        return 0xFF000000 | (Math.round(ar + (br - ar) * t) << 16)
+                | (Math.round(ag + (bg - ag) * t) << 8) | Math.round(ab + (bb - ab) * t);
+    }
+
+    /** Circular colour preview with a checkerboard behind it for alpha. */
+    static class ColorPreviewView extends View {
+        int color = 0xFF000000;
+        int outlineColor = 0xFF777777;
+        int checkA = 0xFFDDDDDD, checkB = 0xFFBBBBBB;
+        final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        final Path clip = new Path();
+
+        ColorPreviewView(Context c) { super(c); }
+
+        void setColor(int c) { color = c; invalidate(); }
+
+        void setPalette(Palette p) {
+            outlineColor = p.outlineVariant;
+            checkA = blend(p.surface, p.onSurface, 0.06f);
+            checkB = blend(p.surface, p.onSurface, 0.12f);
+            invalidate();
+        }
+
+        @Override protected void onDraw(Canvas canvas) {
+            float w = getWidth(), h = getHeight();
+            float cx = w / 2f, cy = h / 2f;
+            float r = Math.min(w, h) / 2f - dpStatic(getContext(), 1);
+            clip.reset();
+            clip.addCircle(cx, cy, r, Path.Direction.CW);
+            canvas.save();
+            canvas.clipPath(clip);
+            int cell = Math.max(4, dpStatic(getContext(), 8));
+            for (int y = 0; y < h; y += cell) {
+                for (int x = 0; x < w; x += cell) {
+                    paint.setColor((((x / cell) + (y / cell)) & 1) == 0 ? checkA : checkB);
+                    canvas.drawRect(x, y, x + cell, y + cell, paint);
+                }
+            }
+            paint.setColor(color);
+            canvas.drawCircle(cx, cy, r, paint);
+            canvas.restore();
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth(dpStatic(getContext(), 2));
+            paint.setColor(outlineColor);
+            canvas.drawCircle(cx, cy, r, paint);
+            paint.setStyle(Paint.Style.FILL);
+        }
+    }
+
+    /** Circular dark/light toggle. Moon in dark mode, sun in light mode. */
+    static class ThemeToggleView extends View {
+        boolean dark = true;
+        int iconColor = 0xFFFFFFFF, bgColor = 0xFF6750A4;
+        final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+
+        ThemeToggleView(Context c) {
+            super(c);
+            setClickable(true);
+            setFocusable(true);
+        }
+
+        void setPalette(Palette p, boolean dark) {
+            this.dark = dark;
+            iconColor = p.onPrimary;
+            bgColor = p.primary;
+            GradientDrawable content = new GradientDrawable();
+            content.setShape(GradientDrawable.OVAL);
+            content.setColor(bgColor);
+            setBackground(new RippleDrawable(
+                    ColorStateList.valueOf(withAlpha(p.onPrimary, 0.18f)), content, null));
+            setContentDescription(dark ? "Switch to light mode" : "Switch to dark mode");
+            invalidate();
+        }
+
+        @Override protected void onDraw(Canvas canvas) {
+            float w = getWidth(), h = getHeight();
+            float cx = w / 2f, cy = h / 2f, r = Math.min(w, h) / 2f;
+            paint.setColor(iconColor);
+            paint.setStyle(Paint.Style.FILL);
+            if (dark) {
+                Path moon = new Path();
+                moon.addCircle(cx, cy, r * 0.42f, Path.Direction.CW);
+                Path cut = new Path();
+                cut.addCircle(cx + r * 0.22f, cy - r * 0.16f, r * 0.40f, Path.Direction.CW);
+                moon.op(cut, Path.Op.DIFFERENCE);
+                canvas.drawPath(moon, paint);
+            } else {
+                canvas.drawCircle(cx, cy, r * 0.28f, paint);
+                paint.setStyle(Paint.Style.STROKE);
+                paint.setStrokeWidth(r * 0.09f);
+                paint.setStrokeCap(Paint.Cap.ROUND);
+                for (int i = 0; i < 8; i++) {
+                    double a = Math.toRadians(i * 45);
+                    float x1 = cx + (float) (Math.cos(a) * r * 0.45f);
+                    float y1 = cy + (float) (Math.sin(a) * r * 0.45f);
+                    float x2 = cx + (float) (Math.cos(a) * r * 0.62f);
+                    float y2 = cy + (float) (Math.sin(a) * r * 0.62f);
+                    canvas.drawLine(x1, y1, x2, y2, paint);
+                }
+            }
+        }
+    }
+
+    /** Lock glyph used by the Shizuku gate. */
+    static class LockIconView extends View {
+        int bg, fg;
+        final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+
+        LockIconView(Context c) { super(c); }
+
+        void setPalette(Palette p) {
+            bg = p.primaryContainer;
+            fg = p.onPrimaryContainer;
+            invalidate();
+        }
+
+        @Override protected void onDraw(Canvas canvas) {
+            float w = getWidth(), h = getHeight();
+            float cx = w / 2f, cy = h / 2f, r = Math.min(w, h) / 2f;
+            paint.setStyle(Paint.Style.FILL);
+            paint.setColor(bg);
+            canvas.drawCircle(cx, cy, r, paint);
+            float s = r * 0.52f;
+            paint.setColor(fg);
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth(r * 0.13f);
+            paint.setStrokeCap(Paint.Cap.ROUND);
+            RectF shackle = new RectF(cx - s * 0.72f, cy - s * 0.95f,
+                    cx + s * 0.72f, cy + s * 0.25f);
+            canvas.drawArc(shackle, 180, 180, false, paint);
+            paint.setStyle(Paint.Style.FILL);
+            RectF body = new RectF(cx - s, cy - s * 0.1f, cx + s, cy + s * 0.85f);
+            canvas.drawRoundRect(body, s * 0.28f, s * 0.28f, paint);
+            paint.setColor(bg);
+            canvas.drawCircle(cx, cy + s * 0.28f, s * 0.18f, paint);
+            RectF key = new RectF(cx - s * 0.09f, cy + s * 0.32f,
+                    cx + s * 0.09f, cy + s * 0.62f);
+            canvas.drawRoundRect(key, s * 0.08f, s * 0.08f, paint);
+        }
+    }
+
+    private int dp(float v) {
         return Math.round(v * getResources().getDisplayMetrics().density);
     }
 
-    private ColorSection addColorSection(LinearLayout root, String title, String key,
+    private ColorSection addColorSection(FrameLayout parent, String key, String title,
                                          int materialId, int customId, String defaultCustom) {
         ColorSection s = new ColorSection();
         s.key = key;
+        s.label = title;
+        s.materialId = materialId;
+        s.customId = customId;
+        s.materialColor = "fill".equals(key) ? materialFill : materialArrow;
+        s.materialOk = "fill".equals(key) ? materialFillOk : materialArrowOk;
 
-        TextView h = new TextView(this);
-        h.setText(title);
-        h.setTextSize(16);
-        h.setTextColor(0xFFFFFFFF);
-        h.setPadding(0, dp(12), 0, 0);
-        root.addView(h);
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setPadding(dp(20), dp(20), dp(20), dp(20));
+        card.setBackground(rounded(pal.surfaceContainer, 28));
+        card.setLayoutParams(new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        s.card = card;
+
+        LinearLayout top = new LinearLayout(this);
+        top.setOrientation(LinearLayout.HORIZONTAL);
+        top.setGravity(Gravity.CENTER_VERTICAL);
+
+        LinearLayout left = new LinearLayout(this);
+        left.setOrientation(LinearLayout.VERTICAL);
+        left.setLayoutParams(new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
         s.modeGroup = new RadioGroup(this);
-        s.modeGroup.setOrientation(RadioGroup.HORIZONTAL);
-        RadioButton mat = new RadioButton(this);
-        mat.setText("Material You");
-        mat.setId(materialId);
-        RadioButton cus = new RadioButton(this);
-        cus.setText("Custom");
-        cus.setId(customId);
-        s.modeGroup.addView(mat);
-        s.modeGroup.addView(cus);
-        root.addView(s.modeGroup);
-
-        LinearLayout row = new LinearLayout(this);
-        row.setOrientation(LinearLayout.HORIZONTAL);
-        row.setGravity(Gravity.CENTER_VERTICAL);
-        s.swatch = new View(this);
-        row.addView(s.swatch, new LinearLayout.LayoutParams(dp(32), dp(32)));
-        s.materialView = new TextView(this);
-        s.materialView.setTextSize(13);
-        s.materialView.setPadding(dp(12), 0, 0, 0);
-        s.materialView.setText("Material You: loading\u2026");
-        row.addView(s.materialView);
-        root.addView(row);
+        s.modeGroup.setOrientation(RadioGroup.VERTICAL);
+        s.materialRadio = makeRadio("Material You", materialId);
+        s.customRadio = makeRadio("Custom", customId);
+        s.modeGroup.addView(s.materialRadio);
+        s.modeGroup.addView(s.customRadio);
+        left.addView(s.modeGroup, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         s.input = new EditText(this);
-        s.input.setHint("#RRGGBB or #AARRGGBB");
-        s.input.setInputType(InputType.TYPE_CLASS_TEXT);
-        s.input.setText(loadCustom(key, defaultCustom));
-        root.addView(s.input);
+        s.input.setHint("#RRGGBB");
+        s.input.setSingleLine(true);
+        s.input.setTextSize(14);
+        s.input.setInputType(InputType.TYPE_CLASS_TEXT
+                | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+                | InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS);
+        s.input.setImeOptions(EditorInfo.IME_ACTION_DONE);
+        s.input.setPadding(dp(14), 0, dp(14), 0);
+        String initial = loadCustom(key, defaultCustom);
+        s.input.setText(initial);
+        Integer initialColor = parseColor(initial);
+        s.customColor = initialColor != null ? initialColor : 0xFF000000;
+        s.inputError = initialColor == null;
+        LinearLayout.LayoutParams ilp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(44));
+        ilp.leftMargin = dp(36);
+        ilp.topMargin = dp(6);
+        left.addView(s.input, ilp);
+
+        top.addView(left);
+
+        s.preview = new ColorPreviewView(this);
+        s.preview.setPalette(pal);
+        LinearLayout.LayoutParams plp = new LinearLayout.LayoutParams(dp(72), dp(72));
+        plp.leftMargin = dp(16);
+        top.addView(s.preview, plp);
+
+        card.addView(top);
+        parent.addView(card);
 
         boolean matMode = loadMode(key, true);
         s.materialMode = matMode;
         s.modeGroup.check(matMode ? materialId : customId);
-        s.input.setEnabled(!matMode);
+        styleInput(s);
+        updateSectionPreview(s);
+
+        s.input.setOnEditorActionListener((v, actionId, event) -> {
+            if (actionId == EditorInfo.IME_ACTION_DONE
+                    || (event != null && event.getKeyCode() == KeyEvent.KEYCODE_ENTER
+                    && event.getAction() == KeyEvent.ACTION_DOWN)) {
+                s.suppressFocusCommit = true;
+                try {
+                    commitCustom(s);
+                    s.input.clearFocus();
+                } finally {
+                    s.suppressFocusCommit = false;
+                }
+                hideKeyboard(s.input);
+                return true;
+            }
+            return false;
+        });
+        s.input.setOnFocusChangeListener((v, hasFocus) -> {
+            if (!hasFocus && !s.suppressFocusCommit) commitCustom(s);
+        });
+        s.input.addTextChangedListener(new TextWatcher() {
+            public void beforeTextChanged(CharSequence cs, int a, int b, int c) {}
+            public void onTextChanged(CharSequence cs, int a, int b, int c) {}
+            public void afterTextChanged(Editable e) {
+                saveCustom(key, e.toString());
+                s.inputError = parseColor(e.toString()) == null;
+                styleInput(s);
+                updateApplyEnabled();
+            }
+        });
         s.modeGroup.setOnCheckedChangeListener((g, id) -> {
             s.materialMode = id == materialId;
-            s.input.setEnabled(!s.materialMode);
             saveMode(key, s.materialMode);
+            styleInput(s);
+            updateSectionPreview(s);
+            updateApplyEnabled();
         });
         return s;
+    }
+
+    private RadioButton makeRadio(String text, int id) {
+        RadioButton r = new RadioButton(this);
+        r.setId(id);
+        r.setText(text);
+        r.setTextSize(16);
+        r.setTextColor(pal.onSurface);
+        r.setButtonTintList(new ColorStateList(
+                new int[][]{ new int[]{android.R.attr.state_checked}, new int[]{} },
+                new int[]{ pal.primary, pal.outline }));
+        r.setMinHeight(0);
+        r.setMinWidth(0);
+        r.setPadding(0, 0, 0, 0);
+        r.setGravity(Gravity.CENTER_VERTICAL);
+        r.setLayoutParams(new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(48)));
+        return r;
+    }
+
+    private void styleInput(ColorSection s) {
+        if (s.input == null) return;
+        boolean enabled = !s.materialMode;
+        s.input.setEnabled(enabled);
+        int stroke = s.inputError ? pal.error : pal.outline;
+        float strokeDp = s.inputError ? 1.5f : 1f;
+        int fill = enabled ? pal.surfaceContainerHighest
+                : blend(pal.surface, pal.onSurface, 0.04f);
+        s.input.setBackground(outlined(fill, stroke, 14, strokeDp));
+        s.input.setTextColor(enabled ? pal.onSurface : withAlpha(pal.onSurface, 0.38f));
+        s.input.setHintTextColor(withAlpha(pal.onSurfaceVariant, enabled ? 0.9f : 0.38f));
+    }
+
+    private void commitCustom(ColorSection s) {
+        if (s.input == null) return;
+        String raw = s.input.getText().toString().trim();
+        Integer c = parseColor(raw);
+        if (c != null) {
+            s.customColor = c;
+            s.inputError = false;
+            if (!s.materialMode) updateSectionPreview(s);
+            log("Custom " + s.label + " color: " + colorToHex(c));
+        } else {
+            s.inputError = true;
+            log("Invalid custom " + s.label + " color: \"" + raw + "\"");
+        }
+        styleInput(s);
+        updateApplyEnabled();
+    }
+
+    private void updateSectionPreview(ColorSection s) {
+        if (s == null || s.preview == null) return;
+        s.preview.setColor(s.materialMode ? s.materialColor : s.customColor);
+        s.preview.animate().scaleX(1.06f).scaleY(1.06f).setDuration(110)
+                .withEndAction(() -> s.preview.animate().scaleX(1f).scaleY(1f)
+                        .setDuration(110).start()).start();
+    }
+
+    private void updateAllPreviews() {
+        updateSectionPreview(fillSection);
+        updateSectionPreview(arrowSection);
+    }
+
+    private void updateApplyEnabled() {
+        if (applyBtn == null) return;
+        boolean ok = true;
+        for (ColorSection s : new ColorSection[]{fillSection, arrowSection}) {
+            if (s == null) continue;
+            if (s.materialMode) {
+                if (!s.materialOk) ok = false;
+            } else if (parseColor(s.input.getText().toString()) == null) {
+                ok = false;
+            }
+        }
+        boolean enabled = ok && !busy;
+        applyBtn.setEnabled(enabled);
+        applyBtn.setAlpha(enabled ? 1f : 0.5f);
+    }
+
+    private void hideKeyboard(View v) {
+        try {
+            InputMethodManager im = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+            if (im != null) im.hideSoftInputFromWindow(v.getWindowToken(), 0);
+        } catch (Throwable ignored) {}
+    }
+
+    private GradientDrawable rounded(int color, float radiusDp) {
+        GradientDrawable d = new GradientDrawable();
+        d.setColor(color);
+        d.setCornerRadius(dp(radiusDp));
+        return d;
+    }
+
+    private GradientDrawable outlined(int fill, int stroke, float radiusDp, float strokeDp) {
+        GradientDrawable d = rounded(fill, radiusDp);
+        d.setStroke(Math.max(1, dp(strokeDp)), stroke);
+        return d;
+    }
+
+    private Drawable ripple(Drawable content, int rippleColor) {
+        return new RippleDrawable(ColorStateList.valueOf(rippleColor), content, null);
+    }
+
+    private TextView label(String text, float sizeSp, int color, boolean bold) {
+        TextView v = new TextView(this);
+        v.setText(text);
+        v.setTextSize(sizeSp);
+        v.setTextColor(color);
+        v.setTypeface(Typeface.create("sans-serif", bold ? Typeface.BOLD : Typeface.NORMAL));
+        return v;
+    }
+
+    private void addSpace(LinearLayout parent, float dp) {
+        View v = new View(this);
+        parent.addView(v, new LinearLayout.LayoutParams(1, dp(dp)));
+    }
+
+    private TextView pillButton(String text, boolean filled, Palette p, Runnable onClick) {
+        TextView b = new TextView(this);
+        b.setText(text);
+        b.setTextSize(16);
+        b.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        b.setGravity(Gravity.CENTER);
+        b.setClickable(true);
+        b.setFocusable(true);
+        b.setMinHeight(0);
+        b.setMinWidth(0);
+        b.setPadding(dp(24), 0, dp(24), 0);
+        if (filled) {
+            b.setTextColor(p.onPrimary);
+            b.setBackground(ripple(rounded(p.primary, 28),
+                    withAlpha(p.onPrimary, 0.18f)));
+        } else {
+            b.setTextColor(p.primary);
+            b.setBackground(ripple(outlined(p.surfaceContainer, p.outline, 28, 1),
+                    withAlpha(p.primary, 0.12f)));
+        }
+        b.setOnClickListener(v -> onClick.run());
+        b.setLayoutParams(new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(56)));
+        return b;
+    }
+
+    private TextView tabButton(String text, int index) {
+        TextView t = new TextView(this);
+        t.setText(text);
+        t.setTextSize(15);
+        t.setGravity(Gravity.CENTER);
+        t.setClickable(true);
+        t.setFocusable(true);
+        t.setPadding(dp(12), 0, dp(12), 0);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, dp(52), 1f);
+        if (index == 1) lp.leftMargin = dp(12);
+        t.setLayoutParams(lp);
+        t.setOnClickListener(v -> selectTab(index));
+        return t;
+    }
+
+    private void styleTab(TextView t, boolean selected) {
+        if (t == null) return;
+        if (selected) {
+            t.setTextColor(pal.onPrimary);
+            t.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+            t.setBackground(ripple(rounded(pal.primary, 26),
+                    withAlpha(pal.onPrimary, 0.18f)));
+        } else {
+            t.setTextColor(pal.onSurfaceVariant);
+            t.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
+            t.setBackground(ripple(rounded(pal.surfaceContainerHigh, 26),
+                    withAlpha(pal.onSurface, 0.10f)));
+        }
+    }
+
+    private void selectTab(int index) {
+        selectedTab = index;
+        styleTab(tabFill, index == 0);
+        styleTab(tabArrow, index == 1);
+        if (fillSection != null && fillSection.card != null) {
+            fillSection.card.setVisibility(index == 0 ? View.VISIBLE : View.GONE);
+        }
+        if (arrowSection != null && arrowSection.card != null) {
+            arrowSection.card.setVisibility(index == 1 ? View.VISIBLE : View.GONE);
+        }
+    }
+
+    private void tintSeekBar(SeekBar bar, Palette p) {
+        bar.setProgressTintList(ColorStateList.valueOf(p.primary));
+        bar.setThumbTintList(ColorStateList.valueOf(p.primary));
+        bar.setProgressBackgroundTintList(ColorStateList.valueOf(
+                blend(p.surface, p.onSurface, 0.12f)));
+        bar.setSplitTrack(false);
+    }
+
+    private void loadDarkMode() {
+        darkMode = getSharedPreferences(SETTINGS, MODE_PRIVATE)
+                .getBoolean("dark_mode", true);
+    }
+
+    private void saveDarkMode(boolean dark) {
+        getSharedPreferences(SETTINGS, MODE_PRIVATE).edit()
+                .putBoolean("dark_mode", dark).apply();
+    }
+
+    private void toggleTheme() {
+        if (busy) return;
+        darkMode = !darkMode;
+        saveDarkMode(darkMode);
+        log("Theme: " + (darkMode ? "dark" : "light"));
+        if (mainShowing && themeLoaded) {
+            pal = darkMode ? paletteDark : paletteLight;
+            if (pal == null) pal = Palette.fallback(darkMode);
+            buildMainUi();
+        }
+    }
+
+    private void applyPaletteToWindow() {
+        try {
+            getWindow().setBackgroundDrawable(new ColorDrawable(pal.surface));
+            getWindow().setStatusBarColor(pal.surface);
+            getWindow().setNavigationBarColor(pal.surface);
+        } catch (Throwable ignored) {}
+        try {
+            if (Build.VERSION.SDK_INT >= 30) {
+                WindowInsetsController c = getWindow().getInsetsController();
+                if (c != null) {
+                    int mask = WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS
+                            | WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS;
+                    c.setSystemBarsAppearance(pal.dark ? 0 : mask, mask);
+                }
+            } else {
+                int flags = getWindow().getDecorView().getSystemUiVisibility();
+                if (pal.dark) {
+                    flags &= ~(View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
+                            | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR);
+                } else {
+                    flags |= (View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
+                            | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR);
+                }
+                getWindow().getDecorView().setSystemUiVisibility(flags);
+            }
+        } catch (Throwable ignored) {}
+    }
+
+    private void setUiBusy(boolean b) {
+        ui.post(() -> {
+            if (applyBtn != null) {
+                applyBtn.setEnabled(!b);
+                applyBtn.setAlpha(b ? 0.5f : 1f);
+            }
+            if (calibBtn != null) {
+                calibBtn.setEnabled(!b);
+                calibBtn.setAlpha(b ? 0.5f : 1f);
+            }
+            if (speedBar != null) speedBar.setEnabled(!b);
+            if (themeToggleView != null) themeToggleView.setEnabled(!b);
+            if (!b) updateApplyEnabled();
+        });
     }
 
     private String loadCustom(String key, String def) {
@@ -186,68 +750,106 @@ public class MainActivity extends Activity {
                 .putBoolean(key + "_material", material).apply();
     }
 
-    private void setSwatch(View v, int color) {
-        GradientDrawable d = new GradientDrawable();
-        d.setShape(GradientDrawable.OVAL);
-        d.setColor(color);
-        d.setStroke(2, 0xFF777777);
-        v.setBackground(d);
-    }
-
-    private void updateMaterialViews() {
-        ui.post(() -> {
-            if (fillSection == null || arrowSection == null) return;
-            if (materialFillOk) {
-                fillSection.materialView.setText("Material You: " + colorToHex(materialFill));
-                setSwatch(fillSection.swatch, materialFill);
-            } else {
-                fillSection.materialView.setText("Material You: unavailable");
-            }
-            if (materialArrowOk) {
-                arrowSection.materialView.setText("Material You: " + colorToHex(materialArrow));
-                setSwatch(arrowSection.swatch, materialArrow);
-            } else {
-                arrowSection.materialView.setText("Material You: unavailable");
-            }
-        });
-    }
-
-    /** Reads the two theme colours from the system and forces 100% alpha. */
-    private void fetchMaterialColors() {
+    /** Loads both Material You palettes and the two colours we apply. */
+    private void fetchThemeData() {
         if (materialFetching) return;
         materialFetching = true;
         new Thread(() -> {
+            Palette dark = null, light = null;
+            boolean fillOk = false, arrowOk = false;
+            int fill = 0, arrow = 0;
             try {
-                if (!waitForShizuku(5000)) {
-                    log("Material You: Shizuku not running");
-                    return;
+                if (!waitForShizuku(6000)) {
+                    log("Theme: Shizuku not running");
+                } else if (Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED) {
+                    log("Theme: Shizuku permission not granted");
+                } else {
+                    String[] roles = {
+                            "primary", "on_primary", "primary_container", "on_primary_container",
+                            "secondary_container", "on_secondary_container",
+                            "surface", "on_surface", "surface_container", "surface_container_high",
+                            "surface_container_highest", "surface_variant", "on_surface_variant",
+                            "outline", "outline_variant", "error", "on_error"
+                    };
+                    StringBuilder cmd = new StringBuilder();
+                    for (String r : roles) {
+                        cmd.append("echo D_").append(r)
+                                .append("=$(cmd overlay lookup --user 0 android android:color/system_")
+                                .append(r).append("_dark)\n");
+                        cmd.append("echo L_").append(r)
+                                .append("=$(cmd overlay lookup --user 0 android android:color/system_")
+                                .append(r).append("_light)\n");
+                    }
+                    cmd.append("echo D_FILL=$(cmd overlay lookup --user 0 android android:color/system_secondary_container_dark)\n");
+                    cmd.append("echo D_ARROW=$(cmd overlay lookup --user 0 android android:color/system_on_secondary_container_dark)\n");
+                    String out = sh(cmd.toString());
+                    java.util.HashMap<String, String> map = new java.util.HashMap<>();
+                    for (String line : out.split("\\r?\\n")) {
+                        int eq = line.indexOf('=');
+                        if (eq > 0) {
+                            map.put(line.substring(0, eq).trim(), line.substring(eq + 1).trim());
+                        }
+                    }
+                    dark = new Palette(true);
+                    light = new Palette(false);
+                    fillPalette(dark, map, "D_");
+                    fillPalette(light, map, "L_");
+                    Integer f = parseMaterialColor(map.get("D_FILL"));
+                    Integer a = parseMaterialColor(map.get("D_ARROW"));
+                    if (f != null && a != null) {
+                        fill = f;
+                        arrow = a;
+                        fillOk = true;
+                        arrowOk = true;
+                    } else {
+                        log("Theme: fill/arrow lookup failed, using fallback");
+                    }
                 }
-                if (Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED) {
-                    log("Material You: Shizuku permission not granted");
-                    return;
-                }
-                String f = sh("cmd overlay lookup --user 0 android android:color/system_secondary_container_dark").trim();
-                String a = sh("cmd overlay lookup --user 0 android android:color/system_on_secondary_container_dark").trim();
-                Integer fc = parseMaterialColor(f);
-                Integer ac = parseMaterialColor(a);
-                if (fc == null || ac == null) {
-                    log("Material You: unexpected output fill='" + f + "' arrow='" + a + "'");
-                    return;
-                }
-                materialFill = fc;
-                materialArrow = ac;
-                materialFillOk = true;
-                materialArrowOk = true;
-                materialRetry = 0;
-                log("Material You: fill=" + colorToHex(fc) + " arrow=" + colorToHex(ac));
-                updateMaterialViews();
             } catch (Throwable t) {
-                log("Material You lookup failed: " + t);
-            } finally {
-                materialFetching = false;
-                updateMaterialViews();
+                log("Theme lookup failed: " + t);
             }
+            if (dark == null) dark = Palette.fallback(true);
+            if (light == null) light = Palette.fallback(false);
+            if (!fillOk) { fill = dark.secondaryContainer; fillOk = true; }
+            if (!arrowOk) { arrow = dark.onSecondaryContainer; arrowOk = true; }
+            paletteDark = dark;
+            paletteLight = light;
+            materialFill = fill;
+            materialArrow = arrow;
+            materialFillOk = fillOk;
+            materialArrowOk = arrowOk;
+            materialRetry = 0;
+            themeLoaded = true;
+            materialFetching = false;
+            log("Theme loaded: fill=" + colorToHex(fill) + " arrow=" + colorToHex(arrow));
+            ui.post(this::buildMainUi);
         }).start();
+    }
+
+    private void fillPalette(Palette p, java.util.HashMap<String, String> map, String prefix) {
+        Palette fb = Palette.fallback(p.dark);
+        p.primary = colorOr(map, prefix + "primary", fb.primary);
+        p.onPrimary = colorOr(map, prefix + "on_primary", fb.onPrimary);
+        p.primaryContainer = colorOr(map, prefix + "primary_container", fb.primaryContainer);
+        p.onPrimaryContainer = colorOr(map, prefix + "on_primary_container", fb.onPrimaryContainer);
+        p.secondaryContainer = colorOr(map, prefix + "secondary_container", fb.secondaryContainer);
+        p.onSecondaryContainer = colorOr(map, prefix + "on_secondary_container", fb.onSecondaryContainer);
+        p.surface = colorOr(map, prefix + "surface", fb.surface);
+        p.onSurface = colorOr(map, prefix + "on_surface", fb.onSurface);
+        p.surfaceContainer = colorOr(map, prefix + "surface_container", fb.surfaceContainer);
+        p.surfaceContainerHigh = colorOr(map, prefix + "surface_container_high", fb.surfaceContainerHigh);
+        p.surfaceContainerHighest = colorOr(map, prefix + "surface_container_highest", fb.surfaceContainerHighest);
+        p.surfaceVariant = colorOr(map, prefix + "surface_variant", fb.surfaceVariant);
+        p.onSurfaceVariant = colorOr(map, prefix + "on_surface_variant", fb.onSurfaceVariant);
+        p.outline = colorOr(map, prefix + "outline", fb.outline);
+        p.outlineVariant = colorOr(map, prefix + "outline_variant", fb.outlineVariant);
+        p.error = colorOr(map, prefix + "error", fb.error);
+        p.onError = colorOr(map, prefix + "on_error", fb.onError);
+    }
+
+    private static int colorOr(java.util.HashMap<String, String> map, String key, int fallback) {
+        Integer c = parseMaterialColor(map.get(key));
+        return c != null ? c : fallback;
     }
 
     private static Integer parseMaterialColor(String s) {
@@ -281,123 +883,56 @@ public class MainActivity extends Activity {
     }
 
     // =====================================================================
-    // UI
+    // Screens
     // =====================================================================
     @Override
     protected void onCreate(Bundle b) {
         super.onCreate(b);
-
         loadSpeed();
-
-        LinearLayout root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
-        final int pad = (int) (16 * getResources().getDisplayMetrics().density);
-        root.setPadding(pad, pad, pad, pad);
-        // Android 15+ draws edge-to-edge; keep the content below the status bar.
-        root.setOnApplyWindowInsetsListener((v, insets) -> {
-            int top = insets.getSystemWindowInsetTop();
-            v.setPadding(pad, pad + top, pad, pad);
-            return insets;
-        });
-
-        TextView title = new TextView(this);
-        title.setText("OHO+ Color Setter");
-        title.setTextSize(20);
-        title.setTextColor(0xFFFFFFFF);
-        root.addView(title);
-
-        TextView hint = new TextView(this);
-        hint.setText("Applies Fill and Arrow together. Material You is read from the system theme.");
-        hint.setTextSize(12);
-        hint.setPadding(0, pad / 2, 0, 0);
-        root.addView(hint);
-
-        fillSection = addColorSection(root, "Fill color", "fill", 2001, 2002, "#473646");
-        arrowSection = addColorSection(root, "Arrow color", "arrow", 3001, 3002, "#D1B8CD");
-
-        TextView speedTitle = new TextView(this);
-        speedTitle.setText("Speed");
-        speedTitle.setPadding(0, pad / 2, 0, 0);
-        root.addView(speedTitle);
-
-        speedLabel = new TextView(this);
-        speedLabel.setTextSize(14);
-        root.addView(speedLabel);
-
-        speedBar = new SeekBar(this);
-        speedBar.setMax(SPEED_FAST);
-        speedBar.setProgress(speed);
-        speedBar.setKeyProgressIncrement(1);
-        speedBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
-            @Override
-            public void onProgressChanged(SeekBar bar, int progress, boolean fromUser) {
-                speed = progress;
-                updateSpeedLabel();
-                if (fromUser) saveSpeed(progress);
-            }
-
-            @Override public void onStartTrackingTouch(SeekBar bar) {}
-
-            @Override public void onStopTrackingTouch(SeekBar bar) {}
-        });
-        root.addView(speedBar);
-
-        TextView speedNote = new TextView(this);
-        speedNote.setTextSize(11);
-        speedNote.setText("Slow = safest  \u2022  Normal = default  \u2022  Fast = quicker, may fail on a laggy device");
-        root.addView(speedNote);
-        updateSpeedLabel();
-
-        applyBtn = new Button(this);
-        applyBtn.setText("Apply both colors");
-        applyBtn.setOnClickListener(v -> startApply());
-        root.addView(applyBtn);
-
-        calibBtn = new Button(this);
-        calibBtn.setText("Calibrate (this device)");
-        calibBtn.setOnClickListener(v -> startCalibration());
-        root.addView(calibBtn);
-
-        Button perm = new Button(this);
-        perm.setText("Grant Shizuku permission");
-        perm.setOnClickListener(v -> requestPerm());
-        root.addView(perm);
-
-        logView = new TextView(this);
-        logView.setTextSize(10);
-        logView.setTypeface(Typeface.MONOSPACE);
-        ScrollView sc = new ScrollView(this);
-        sc.addView(logView);
-        root.addView(sc, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
-
-        setContentView(root);
+        loadDarkMode();
+        pal = Palette.fallback(darkMode);
+        applyPaletteToWindow();
 
         try {
-            Shizuku.addBinderReceivedListenerSticky(() -> {
+            Shizuku.addBinderReceivedListenerSticky(() -> ui.post(() -> {
                 log("Shizuku binder received");
-                fetchMaterialColors();
-            });
-            Shizuku.addRequestPermissionResultListener((code, res) -> {
-                log("Permission result: " + (res == PackageManager.PERMISSION_GRANTED ? "GRANTED" : "DENIED(" + res + ")"));
-                if (res == PackageManager.PERMISSION_GRANTED) fetchMaterialColors();
-            });
+                onShizukuStateChanged();
+            }));
+            Shizuku.addBinderDeadListener(() -> ui.post(() -> {
+                log("Shizuku binder lost");
+                onShizukuStateChanged();
+            }));
+            Shizuku.addRequestPermissionResultListener((code, res) -> ui.post(() -> {
+                log("Permission result: " + (res == PackageManager.PERMISSION_GRANTED
+                        ? "GRANTED" : "DENIED(" + res + ")"));
+                lastGateKey = "";
+                onShizukuStateChanged();
+            }));
         } catch (Throwable t) {
             log("Shizuku listener error: " + t);
         }
 
         log("Ready. Shizuku running: " + safePing());
         loadCalibration();
-        fetchMaterialColors();
+        pendingIntent = getIntent();
+        onShizukuStateChanged();
+    }
 
-        applyIntent(getIntent());
+    @Override
+    protected void onResume() {
+        super.onResume();
+        onShizukuStateChanged();
     }
 
     @Override
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
         setIntent(intent);
-        applyIntent(intent);
+        pendingIntent = intent;
+        if (mainShowing) {
+            pendingIntent = null;
+            applyIntent(intent);
+        }
     }
 
     @Override
@@ -406,8 +941,382 @@ public class MainActivity extends Activity {
         super.onDestroy();
     }
 
+    private void onShizukuStateChanged() {
+        boolean running = safePingBool();
+        boolean granted = running && safeGranted();
+        if (granted) {
+            if (!themeLoaded) {
+                if (!loadingShowing) showLoading();
+                fetchThemeData();
+            } else if (!mainShowing) {
+                buildMainUi();
+            }
+        } else {
+            String key = isShizukuInstalled() + "|" + running + "|" + granted;
+            if (!gateShowing || !key.equals(lastGateKey)) {
+                lastGateKey = key;
+                showGate();
+            }
+        }
+    }
+
+    private boolean safePingBool() {
+        try { return Shizuku.pingBinder(); } catch (Throwable t) { return false; }
+    }
+
+    private boolean safeGranted() {
+        try {
+            return Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    private boolean isShizukuInstalled() {
+        try {
+            getPackageManager().getPackageInfo("moe.shizuku.privileged.api", 0);
+            return true;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    private void showLoading() {
+        loadingShowing = true;
+        gateShowing = false;
+        mainShowing = false;
+        pal = Palette.fallback(darkMode);
+        applyPaletteToWindow();
+
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setGravity(Gravity.CENTER);
+        root.setBackgroundColor(pal.surface);
+        final int pad = dp(24);
+        root.setOnApplyWindowInsetsListener((v, insets) -> {
+            v.setPadding(pad, pad + insets.getSystemWindowInsetTop(),
+                    pad, pad + insets.getSystemWindowInsetBottom());
+            return insets;
+        });
+
+        TextView title = label("OHO+ Monet", 32, pal.onSurface, true);
+        title.setGravity(Gravity.CENTER);
+        root.addView(title);
+        addSpace(root, 16);
+
+        ProgressBar bar = new ProgressBar(this);
+        bar.setIndeterminateTintList(ColorStateList.valueOf(pal.primary));
+        LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(dp(40), dp(40));
+        blp.gravity = Gravity.CENTER_HORIZONTAL;
+        root.addView(bar, blp);
+        addSpace(root, 12);
+
+        TextView msg = label("Loading theme\u2026", 14, pal.onSurfaceVariant, false);
+        msg.setGravity(Gravity.CENTER);
+        root.addView(msg);
+
+        setContentView(root);
+    }
+
+    private void buildMainUi() {
+        if (!safePingBool() || !safeGranted()) {
+            showGate();
+            return;
+        }
+        if (!themeLoaded) {
+            if (!loadingShowing) showLoading();
+            return;
+        }
+        mainShowing = true;
+        gateShowing = false;
+        loadingShowing = false;
+        pal = darkMode ? paletteDark : paletteLight;
+        if (pal == null) pal = Palette.fallback(darkMode);
+        applyPaletteToWindow();
+
+        ScrollView scroll = new ScrollView(this);
+        scroll.setFillViewport(true);
+        scroll.setBackgroundColor(pal.surface);
+        scroll.setVerticalScrollBarEnabled(false);
+
+        LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
+        final int baseLeft = dp(20), baseTop = dp(20);
+        final int baseRight = dp(20), baseBottom = dp(24);
+        content.setPadding(baseLeft, baseTop, baseRight, baseBottom);
+        scroll.addView(content, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        scroll.setOnApplyWindowInsetsListener((v, insets) -> {
+            content.setPadding(baseLeft, baseTop + insets.getSystemWindowInsetTop(),
+                    baseRight, baseBottom + insets.getSystemWindowInsetBottom());
+            return insets;
+        });
+
+        // Header
+        LinearLayout header = new LinearLayout(this);
+        header.setOrientation(LinearLayout.HORIZONTAL);
+        header.setGravity(Gravity.CENTER_VERTICAL);
+        TextView title = label("OHO+ Monet", 32, pal.onSurface, true);
+        title.setLetterSpacing(-0.02f);
+        header.addView(title, new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        themeToggleView = new ThemeToggleView(this);
+        themeToggleView.setPalette(pal, darkMode);
+        themeToggleView.setOnClickListener(v -> toggleTheme());
+        header.addView(themeToggleView, new LinearLayout.LayoutParams(dp(48), dp(48)));
+        content.addView(header);
+        addSpace(content, 20);
+
+        // Tabs
+        LinearLayout tabs = new LinearLayout(this);
+        tabs.setOrientation(LinearLayout.HORIZONTAL);
+        tabFill = tabButton("Fill color", 0);
+        tabArrow = tabButton("Arrow color", 1);
+        tabs.addView(tabFill);
+        tabs.addView(tabArrow);
+        content.addView(tabs);
+        addSpace(content, 16);
+
+        // Tab content: both cards, only the selected one is visible
+        tabContent = new FrameLayout(this);
+        fillSection = addColorSection(tabContent, "fill", "Fill color",
+                2001, 2002, "#473646");
+        arrowSection = addColorSection(tabContent, "arrow", "Arrow color",
+                3001, 3002, "#D1B8CD");
+        content.addView(tabContent);
+        selectTab(selectedTab);
+        addSpace(content, 24);
+
+        // Speed
+        content.addView(label("Speed", 16, pal.onSurface, true));
+        addSpace(content, 8);
+        LinearLayout speedRow = new LinearLayout(this);
+        speedRow.setOrientation(LinearLayout.HORIZONTAL);
+        speedRow.setGravity(Gravity.CENTER_VERTICAL);
+        speedRow.addView(label("Slow", 12, pal.onSurfaceVariant, false));
+        speedBar = new SeekBar(this);
+        speedBar.setMax(SPEED_FAST);
+        speedBar.setProgress(speed);
+        speedBar.setKeyProgressIncrement(1);
+        tintSeekBar(speedBar, pal);
+        speedBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            public void onProgressChanged(SeekBar bar, int progress, boolean fromUser) {
+                speed = progress;
+                if (fromUser) saveSpeed(progress);
+            }
+            public void onStartTrackingTouch(SeekBar bar) {}
+            public void onStopTrackingTouch(SeekBar bar) {}
+        });
+        LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(0, dp(48), 1f);
+        slp.leftMargin = dp(12);
+        slp.rightMargin = dp(12);
+        speedRow.addView(speedBar, slp);
+        speedRow.addView(label("Fast", 12, pal.onSurfaceVariant, false));
+        content.addView(speedRow);
+        TextView speedNote = label(
+                "Fast may fail on some devices. If applying fails, use Normal or Slow.",
+                12, pal.onSurfaceVariant, false);
+        speedNote.setLineSpacing(dp(2), 1f);
+        content.addView(speedNote);
+        addSpace(content, 24);
+
+        // Actions
+        applyBtn = pillButton("Apply", true, pal, this::startApply);
+        content.addView(applyBtn);
+        addSpace(content, 12);
+        calibBtn = pillButton("Recalibrate", false, pal, this::startCalibration);
+        content.addView(calibBtn);
+        addSpace(content, 24);
+
+        // Logs
+        LinearLayout logs = new LinearLayout(this);
+        logs.setOrientation(LinearLayout.VERTICAL);
+        logs.setPadding(dp(20), dp(16), dp(20), dp(16));
+        logs.setBackground(rounded(pal.surfaceContainer, 24));
+        logs.addView(label("Logs", 16, pal.onSurface, true));
+        addSpace(logs, 8);
+        logView = new TextView(this);
+        logView.setTextSize(11);
+        logView.setTypeface(Typeface.MONOSPACE);
+        logView.setTextColor(pal.onSurfaceVariant);
+        logView.setText(logBuffer.toString());
+        logView.setLineSpacing(dp(2), 1f);
+        ScrollView logScroll = new ScrollView(this);
+        logScroll.setVerticalScrollBarEnabled(false);
+        logScroll.setNestedScrollingEnabled(true);
+        logScroll.addView(logView, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        logs.addView(logScroll, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(160)));
+        content.addView(logs);
+
+        setContentView(scroll);
+        scroll.post(() -> logScroll.fullScroll(View.FOCUS_DOWN));
+
+        updateAllPreviews();
+        setUiBusy(busy);
+        updateApplyEnabled();
+        scroll.setAlpha(0f);
+        scroll.animate().alpha(1f).setDuration(220).start();
+
+        if (pendingIntent != null) {
+            Intent it = pendingIntent;
+            pendingIntent = null;
+            applyIntent(it);
+        }
+    }
+
+    private void showGate() {
+        gateShowing = true;
+        mainShowing = false;
+        loadingShowing = false;
+        pal = (paletteDark != null) ? (darkMode ? paletteDark : paletteLight)
+                : Palette.fallback(darkMode);
+        if (pal == null) pal = Palette.fallback(darkMode);
+        applyPaletteToWindow();
+
+        boolean installed = isShizukuInstalled();
+        boolean running = safePingBool();
+        boolean granted = running && safeGranted();
+
+        FrameLayout root = new FrameLayout(this);
+        root.setBackgroundColor(pal.surface);
+        final int pad = dp(24);
+        root.setOnApplyWindowInsetsListener((v, insets) -> {
+            v.setPadding(pad, pad + insets.getSystemWindowInsetTop(),
+                    pad, pad + insets.getSystemWindowInsetBottom());
+            return insets;
+        });
+
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setPadding(dp(24), dp(28), dp(24), dp(24));
+        card.setBackground(rounded(pal.surfaceContainer, 32));
+        root.addView(card, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER));
+
+        LockIconView icon = new LockIconView(this);
+        icon.setPalette(pal);
+        LinearLayout.LayoutParams ilp = new LinearLayout.LayoutParams(dp(72), dp(72));
+        ilp.gravity = Gravity.CENTER_HORIZONTAL;
+        card.addView(icon, ilp);
+        addSpace(card, 20);
+
+        TextView title = label("Shizuku required", 28, pal.onSurface, true);
+        title.setGravity(Gravity.CENTER_HORIZONTAL);
+        card.addView(title);
+        addSpace(card, 12);
+
+        TextView body = label(
+                "OHO+ Monet uses Shizuku to change One Hand Operation+ settings. "
+                        + "Shizuku must be installed, running, and allowed to control this app.",
+                15, pal.onSurfaceVariant, false);
+        body.setGravity(Gravity.CENTER_HORIZONTAL);
+        body.setLineSpacing(dp(3), 1f);
+        card.addView(body);
+        addSpace(card, 20);
+
+        LinearLayout statusRow = new LinearLayout(this);
+        statusRow.setOrientation(LinearLayout.HORIZONTAL);
+        statusRow.setGravity(Gravity.CENTER);
+        statusRow.setPadding(dp(14), dp(8), dp(14), dp(8));
+        statusRow.setBackground(rounded(pal.surfaceContainerHigh, 20));
+        View dot = new View(this);
+        GradientDrawable dotBg = new GradientDrawable();
+        dotBg.setShape(GradientDrawable.OVAL);
+        dotBg.setColor(!running ? pal.error : pal.primary);
+        dot.setBackground(dotBg);
+        LinearLayout.LayoutParams dlp = new LinearLayout.LayoutParams(dp(8), dp(8));
+        dlp.rightMargin = dp(8);
+        statusRow.addView(dot, dlp);
+        String statusText = !installed ? "Shizuku is not installed"
+                : !running ? "Shizuku is not running" : "Permission not granted";
+        statusRow.addView(label(statusText, 13, pal.onSurfaceVariant, false));
+        LinearLayout.LayoutParams srp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        srp.gravity = Gravity.CENTER_HORIZONTAL;
+        card.addView(statusRow, srp);
+        addSpace(card, 24);
+
+        String actionText = !installed ? "Install Shizuku"
+                : !running ? "Open Shizuku" : "Grant permission";
+        card.addView(pillButton(actionText, true, pal,
+                () -> onGateAction(installed, running, granted)));
+        addSpace(card, 12);
+        card.addView(pillButton("Exit", false, pal, this::exitApp));
+
+        addSpace(card, 16);
+        String hintText = !installed
+                ? "Install Shizuku from the Play Store, start it, then return here."
+                : !running
+                ? "Open Shizuku and start the service, then return here."
+                : "Tap Grant permission and allow access.";
+        TextView hint = label(hintText, 12, pal.onSurfaceVariant, false);
+        hint.setGravity(Gravity.CENTER_HORIZONTAL);
+        card.addView(hint);
+
+        setContentView(root);
+        root.setAlpha(0f);
+        root.animate().alpha(1f).setDuration(220).start();
+    }
+
+    private void onGateAction(boolean installed, boolean running, boolean granted) {
+        if (granted) {
+            onShizukuStateChanged();
+            return;
+        }
+        if (!installed) {
+            openPlayStore();
+            return;
+        }
+        if (!running) {
+            try {
+                Intent i = getPackageManager().getLaunchIntentForPackage("moe.shizuku.privileged.api");
+                if (i != null) startActivity(i);
+                else toast("Could not open Shizuku");
+            } catch (Throwable t) {
+                toast("Could not open Shizuku");
+            }
+            return;
+        }
+        try {
+            log("Requesting Shizuku permission...");
+            Shizuku.requestPermission(0);
+        } catch (Throwable t) {
+            log("requestPermission error: " + t);
+            toast("Could not request permission");
+        }
+    }
+
+    private void openPlayStore() {
+        try {
+            Intent i = new Intent(Intent.ACTION_VIEW,
+                    Uri.parse("market://details?id=moe.shizuku.privileged.api"));
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(i);
+        } catch (Throwable t) {
+            try {
+                Intent i = new Intent(Intent.ACTION_VIEW,
+                        Uri.parse("https://play.google.com/store/apps/details?id=moe.shizuku.privileged.api"));
+                i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                startActivity(i);
+            } catch (Throwable t2) {
+                toast("Install Shizuku from the Play Store");
+            }
+        }
+    }
+
+    private void exitApp() {
+        finishAffinity();
+    }
+
     private void applyIntent(Intent it) {
         if (it == null) return;
+        if (!mainShowing || fillSection == null || arrowSection == null) {
+            pendingIntent = it;
+            return;
+        }
         String hx = it.getStringExtra("hex");
         String tg = it.getStringExtra("target");
         String fillExtra = it.getStringExtra("fill");
@@ -421,32 +1330,46 @@ public class MainActivity extends Activity {
             speed = sp;
             saveSpeed(sp);
             if (speedBar != null) speedBar.setProgress(sp);
-            updateSpeedLabel();
         }
 
+        boolean targetArrow = false;
+        boolean colorTarget = false;
         if (fillExtra != null) {
-            fillSection.modeGroup.check(2002);
+            fillSection.modeGroup.check(fillSection.customId);
             fillSection.input.setText(fillExtra);
+            commitCustom(fillSection);
+            colorTarget = true;
         } else if (fillMat) {
-            fillSection.modeGroup.check(2001);
+            fillSection.modeGroup.check(fillSection.materialId);
+            colorTarget = true;
         }
         if (arrowExtra != null) {
-            arrowSection.modeGroup.check(3002);
+            arrowSection.modeGroup.check(arrowSection.customId);
             arrowSection.input.setText(arrowExtra);
+            commitCustom(arrowSection);
+            targetArrow = true;
+            colorTarget = true;
         } else if (arrowMat) {
-            arrowSection.modeGroup.check(3001);
+            arrowSection.modeGroup.check(arrowSection.materialId);
+            targetArrow = true;
+            colorTarget = true;
         }
 
         // Backward-compatible single-colour intent: --es hex --es target fill|arrow
         if (hx != null && !hx.isEmpty()) {
             if ("arrow".equalsIgnoreCase(tg)) {
-                arrowSection.modeGroup.check(3002);
+                arrowSection.modeGroup.check(arrowSection.customId);
                 arrowSection.input.setText(hx);
+                commitCustom(arrowSection);
+                targetArrow = true;
             } else {
-                fillSection.modeGroup.check(2002);
+                fillSection.modeGroup.check(fillSection.customId);
                 fillSection.input.setText(hx);
+                commitCustom(fillSection);
             }
+            colorTarget = true;
         }
+        if (colorTarget) selectTab(targetArrow ? 1 : 0);
 
         if (hx != null || tg != null || fillExtra != null || arrowExtra != null
                 || fillMat || arrowMat || auto || cal || sp >= 0) {
@@ -470,32 +1393,15 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void requestPerm() {
-        try {
-            if (!Shizuku.pingBinder()) {
-                log("Shizuku is not running. Start Shizuku first.");
-                return;
-            }
-            if (Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED) {
-                log("Shizuku permission already granted.");
-                return;
-            }
-            log("Requesting Shizuku permission...");
-            Shizuku.requestPermission(0);
-        } catch (Throwable t) {
-            log("requestPerm error: " + t);
-        }
-    }
-
-    private Integer resolveColor(ColorSection s, boolean materialOk, int materialColor, String label) {
+    private Integer resolveColor(ColorSection s, String label) {
         if (s.materialMode) {
-            if (!materialOk) {
+            if (!s.materialOk) {
                 String msg = "Material You " + label + " color unavailable \u2014 check Shizuku/permission";
                 log(msg);
                 toast(msg);
                 return null;
             }
-            return materialColor;
+            return s.materialColor;
         }
         String raw = s.input.getText().toString();
         Integer c = parseColor(raw);
@@ -512,8 +1418,8 @@ public class MainActivity extends Activity {
         if (busy) return;
 
         // Material You is fetched in the background at startup; wait briefly for it.
-        if ((fillSection.materialMode && !materialFillOk)
-                || (arrowSection.materialMode && !materialArrowOk)) {
+        if ((fillSection.materialMode && !fillSection.materialOk)
+                || (arrowSection.materialMode && !arrowSection.materialOk)) {
             if (materialRetry < 5) {
                 materialRetry++;
                 log("Waiting for Material You colors\u2026");
@@ -523,8 +1429,8 @@ public class MainActivity extends Activity {
         }
         materialRetry = 0;
 
-        Integer fillColor = resolveColor(fillSection, materialFillOk, materialFill, "Fill");
-        Integer arrowColor = resolveColor(arrowSection, materialArrowOk, materialArrow, "Arrow");
+        Integer fillColor = resolveColor(fillSection, "Fill");
+        Integer arrowColor = resolveColor(arrowSection, "Arrow");
         if (fillColor == null || arrowColor == null) return;
 
         saveCustom("fill", fillSection.input.getText().toString());
@@ -535,9 +1441,7 @@ public class MainActivity extends Activity {
         flowSpeed = speed;   // slider applies to Apply only
         log("Apply flow speed: " + speedName(flowSpeed));
         log("Fill=" + colorToHex(fc) + " Arrow=" + colorToHex(ac));
-        applyBtn.setEnabled(false);
-        calibBtn.setEnabled(false);
-        if (speedBar != null) speedBar.setEnabled(false);
+        setUiBusy(true);
         step("Applying Fill and Arrow\u2026");
         lastResult = "Done";
 
@@ -554,11 +1458,7 @@ public class MainActivity extends Activity {
                 focusApp();
                 finishOverlay(lastResult);
                 busy = false;
-                ui.post(() -> {
-                    applyBtn.setEnabled(true);
-                    calibBtn.setEnabled(true);
-                    if (speedBar != null) speedBar.setEnabled(true);
-                });
+                setUiBusy(false);
                 log("=== done ===");
             }
         }).start();
@@ -570,9 +1470,7 @@ public class MainActivity extends Activity {
         flowSpeed = SPEED_NORMAL;   // calibration always uses the default preset
         log("Calibration flow speed: " + speedName(flowSpeed)
                 + " (slider: " + speedName(speed) + ")");
-        applyBtn.setEnabled(false);
-        calibBtn.setEnabled(false);
-        if (speedBar != null) speedBar.setEnabled(false);
+        setUiBusy(true);
         step("Calibrating this device\u2026");
         lastResult = "Calibration done";
 
@@ -589,11 +1487,7 @@ public class MainActivity extends Activity {
                 focusApp();
                 finishOverlay(lastResult);
                 busy = false;
-                ui.post(() -> {
-                    applyBtn.setEnabled(true);
-                    calibBtn.setEnabled(true);
-                    if (speedBar != null) speedBar.setEnabled(true);
-                });
+                setUiBusy(false);
                 log("=== calibration finished ===");
             }
         }).start();
@@ -1323,12 +2217,6 @@ public class MainActivity extends Activity {
         return s == SPEED_SLOW ? "Slow" : s == SPEED_FAST ? "Fast" : "Normal";
     }
 
-    private void updateSpeedLabel() {
-        if (speedLabel == null) return;
-        speedLabel.setText("Speed: " + speedName(speed));
-        speedLabel.setTextColor(speed == SPEED_FAST ? 0xFFFF6D00 : 0xFF808080);
-    }
-
     /**
      * If a Fast run fails, tell the user the preset may be too fast for this
      * device. Interruptions and Shizuku problems are not speed related.
@@ -1686,14 +2574,8 @@ public class MainActivity extends Activity {
                 if (overlayView == null) {
                     TextView tv = new TextView(this);
                     tv.setTextSize(15);
-                    tv.setTextColor(Color.WHITE);
-                    tv.setPadding(48, 20, 48, 20);
                     tv.setGravity(Gravity.CENTER);
-                    GradientDrawable bg = new GradientDrawable();
-                    bg.setColor(0xE6000000);
-                    bg.setCornerRadius(60);
-                    bg.setStroke(2, 0x66FFFFFF);
-                    tv.setBackground(bg);
+                    tv.setPadding(dp(24), dp(12), dp(24), dp(12));
 
                     WindowManager wm = (WindowManager) getSystemService(WINDOW_SERVICE);
                     WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
@@ -1704,11 +2586,17 @@ public class MainActivity extends Activity {
                                     | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
                             PixelFormat.TRANSLUCENT);
                     lp.gravity = Gravity.TOP | Gravity.CENTER_HORIZONTAL;
-                    lp.y = 90;
+                    lp.y = dp(64);
                     wm.addView(tv, lp);
                     overlayView = tv;
                     overlayWm = wm;
                 }
+                overlayView.setTextColor(pal.onSurface);
+                GradientDrawable bg = new GradientDrawable();
+                bg.setColor(pal.surfaceContainerHigh);
+                bg.setCornerRadius(dp(28));
+                bg.setStroke(Math.max(1, dp(1)), pal.outlineVariant);
+                overlayView.setBackground(bg);
                 overlayView.setText(msg);
                 overlayView.setVisibility(View.VISIBLE);
             } catch (Throwable t) {
@@ -1768,15 +2656,18 @@ public class MainActivity extends Activity {
     }
 
     private void log(String s) {
+        synchronized (logBuffer) {
+            logBuffer.append(s).append('\n');
+        }
+        final TextView target = logView;
         ui.post(() -> {
-            logView.append(s + "\n");
-            if (logView.getParent() instanceof ScrollView) {
-                ((ScrollView) logView.getParent()).post(() -> {
-                    ScrollView sv = (ScrollView) logView.getParent();
-                    if (sv != null) sv.fullScroll(ScrollView.FOCUS_DOWN);
-                });
+            if (target == null) return;
+            target.append(s + "\n");
+            if (target.getParent() instanceof ScrollView) {
+                ScrollView sv = (ScrollView) target.getParent();
+                sv.post(() -> sv.fullScroll(ScrollView.FOCUS_DOWN));
             }
         });
-        android.util.Log.i("OhoColorSetter", s);
+        android.util.Log.i("OhoMonet", s);
     }
 }
