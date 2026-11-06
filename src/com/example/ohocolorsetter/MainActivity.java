@@ -80,6 +80,7 @@ public class MainActivity extends Activity {
     private WindowManager overlayWm;
     private volatile boolean overlayAllowed = false;
     private volatile String lastResult = "Done";
+    private volatile String expectedFocus = null;
     private final Handler ui = new Handler(Looper.getMainLooper());
     private volatile boolean busy = false;
 
@@ -179,17 +180,22 @@ public class MainActivity extends Activity {
     private void applyIntent(Intent it) {
         if (it == null) return;
         String hx = it.getStringExtra("hex");
+        String tg = it.getStringExtra("target");
+        boolean auto = it.getBooleanExtra("auto", false);
+        boolean cal = it.getBooleanExtra("calibrate", false);
+        if (hx != null || tg != null || auto || cal) {
+            log("intent: hex=" + hx + " target=" + tg + " auto=" + auto + " calibrate=" + cal);
+        }
         if (hx != null && !hx.isEmpty()) {
             if (!hx.startsWith("#")) hx = "#" + hx;
             hexInput.setText(hx);
         }
-        String tg = it.getStringExtra("target");
         if ("arrow".equalsIgnoreCase(tg)) targetGroup.check(1002);
         else if ("fill".equalsIgnoreCase(tg)) targetGroup.check(1001);
 
-        if (it.getBooleanExtra("calibrate", false)) {
+        if (cal) {
             hexInput.postDelayed(this::startCalibration, 900);
-        } else if (it.getBooleanExtra("auto", false)) {
+        } else if (auto) {
             hexInput.postDelayed(this::startApply, 900);
         }
     }
@@ -313,12 +319,39 @@ public class MainActivity extends Activity {
         return new String(shBytes(cmd), "UTF-8");
     }
 
+    /** Remember which OHO+ screen must be in front before the next interaction. */
+    private void expect(String cls) {
+        expectedFocus = cls;
+    }
+
+    /**
+     * Abort if the foreground window is no longer the expected OHO+ screen.
+     * This catches quick settings, the notification shade, home/recents, another
+     * app, the lock screen or a different OHO+ screen.
+     */
+    private void checkFocus() throws Exception {
+        String exp = expectedFocus;
+        if (exp == null) return;
+        String s = sh("dumpsys window | grep mCurrentFocus");
+        if (!s.contains(exp)) {
+            sleep(200);
+            s = sh("dumpsys window | grep mCurrentFocus");
+            if (!s.contains(exp)) {
+                String where = s.replace("mCurrentFocus=", "").trim();
+                if (where.isEmpty()) where = "unknown";
+                throw new Exception("interrupted by another screen/app (" + where + ")");
+            }
+        }
+    }
+
     private void tap(int x, int y) throws Exception {
+        checkFocus();
         log("  tap " + x + "," + y);
         sh("input tap " + x + " " + y);
     }
 
     private void swipe(int x1, int y1, int x2, int y2, int ms) throws Exception {
+        checkFocus();
         log("  swipe " + x1 + "," + y1 + " -> " + x2 + "," + y2);
         sh("input swipe " + x1 + " " + y1 + " " + x2 + " " + y2 + " " + ms);
     }
@@ -358,14 +391,20 @@ public class MainActivity extends Activity {
             Pattern.compile("\\[(\\d+),(\\d+)\\]\\[(\\d+),(\\d+)\\]");
 
     private List<Nd> dumpUi() throws Exception {
+        checkFocus();
         for (int attempt = 0; attempt < 3; attempt++) {
             String s = sh("uiautomator dump /data/local/tmp/oho_ui.xml >/dev/null 2>&1; cat /data/local/tmp/oho_ui.xml");
             int i = s.indexOf("<?xml");
             if (i >= 0) {
+                List<Nd> nodes = null;
                 try {
-                    return parseXml(s.substring(i));
+                    nodes = parseXml(s.substring(i));
                 } catch (Exception e) {
                     log("  dump parse failed: " + e.getMessage());
+                }
+                if (nodes != null) {
+                    checkFocus();   // catch an interruption that happened during the dump
+                    return nodes;
                 }
             }
             sleep(500);
@@ -528,6 +567,7 @@ public class MainActivity extends Activity {
         sh("am start -W -n " + ACT_MAIN + " --activity-clear-top");
         if (!waitForActivity(ACT_MAIN.substring(ACT_MAIN.indexOf('/') + 1), 6000))
             log("  warning: main activity not focused yet");
+        expect("SGPSettingsActivity");
         sleep(700);
 
         // 2. Advanced settings
@@ -537,6 +577,7 @@ public class MainActivity extends Activity {
         if (adv == null) throw new Exception("'Advanced settings' row not found");
         tap(adv.cx(), adv.cy());
         if (!waitForActivity(ACT_ADV, 6000)) log("  warning: advanced activity not focused");
+        expect("SGPMoreSettingActivity");
         sleep(600);
 
         // 3. Animation row (tap title, left of the switch)
@@ -549,6 +590,7 @@ public class MainActivity extends Activity {
         if (sw != null && ax > sw.l - 40) ax = sw.l - 80;
         tap(ax, anim.cy());
         if (!waitForActivity(ACT_ANIM, 6000)) log("  warning: animation activity not focused");
+        expect("SGPAnimationStyleActivity");
         sleep(600);
 
         // 4. Fill / Arrow colour row
@@ -559,6 +601,7 @@ public class MainActivity extends Activity {
         Nd swatchRow = row;
         tap(row.cx(), row.cy());
         if (!waitForActivity(ACT_PICK, 6000)) log("  warning: picker not focused");
+        expect("SGPColorPickerActivity");
         sleep(700);
 
         double corrX = 0, corrY = 0;
@@ -640,6 +683,7 @@ public class MainActivity extends Activity {
             step("Saving color\u2026");
             tap(done.cx(), done.cy());
             if (!waitForActivity(ACT_ANIM, 6000)) log("  warning: did not return to animation screen");
+            expect("SGPAnimationStyleActivity");
             sleep(700);
 
             // 9. verify swatch
@@ -674,6 +718,7 @@ public class MainActivity extends Activity {
             swatchRow = row2;
             tap(row2.cx(), row2.cy());
             if (!waitForActivity(ACT_PICK, 6000)) log("  warning: picker not focused (retry)");
+            expect("SGPColorPickerActivity");
             sleep(700);
         }
 
@@ -740,6 +785,7 @@ public class MainActivity extends Activity {
         step("Opening OHO+\u2026");
         sh("am start -W -n " + ACT_MAIN + " --activity-clear-top");
         waitForActivity(ACT_MAIN.substring(ACT_MAIN.indexOf('/') + 1), 6000);
+        expect("SGPSettingsActivity");
         sleep(700);
 
         List<Nd> ui = dumpUi();
@@ -748,6 +794,7 @@ public class MainActivity extends Activity {
         status("Navigating to Advanced settings\u2026");
         tap(adv.cx(), adv.cy());
         waitForActivity(ACT_ADV, 6000);
+        expect("SGPMoreSettingActivity");
         sleep(600);
 
         ui = dumpUi();
@@ -759,6 +806,7 @@ public class MainActivity extends Activity {
         status("Opening Animation settings\u2026");
         tap(ax, anim.cy());
         waitForActivity(ACT_ANIM, 6000);
+        expect("SGPAnimationStyleActivity");
         sleep(600);
 
         ui = dumpUi();
@@ -767,6 +815,7 @@ public class MainActivity extends Activity {
         status("Opening color picker\u2026");
         tap(row.cx(), row.cy());
         waitForActivity(ACT_PICK, 6000);
+        expect("SGPColorPickerActivity");
         sleep(700);
 
         ui = dumpUi();
@@ -855,6 +904,7 @@ public class MainActivity extends Activity {
             sh("input keyevent 4");
         }
         waitForActivity(ACT_ANIM, 5000);
+        expect("SGPAnimationStyleActivity");
         sleep(400);
 
         if (Math.abs(dH) > 10 || Math.abs(dS) > 0.06) {
