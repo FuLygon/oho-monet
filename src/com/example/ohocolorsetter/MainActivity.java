@@ -465,6 +465,7 @@ public class MainActivity extends Activity {
     static class Nd {
         String cls = "", id = "", text = "", desc = "";
         int l, t, r, b;
+        boolean checked;
         int cx() { return (l + r) / 2; }
         int cy() { return (t + b) / 2; }
         int w() { return r - l; }
@@ -645,6 +646,7 @@ public class MainActivity extends Activity {
         n.id = e.getAttribute("resource-id");
         n.text = e.getAttribute("text");
         n.desc = e.getAttribute("content-desc");
+        n.checked = "true".equals(e.getAttribute("checked"));
         return n;
     }
 
@@ -655,6 +657,38 @@ public class MainActivity extends Activity {
 
     private static Nd byText(List<Nd> nodes, String text) {
         for (Nd n : nodes) if (text.equals(n.text)) return n;
+        return null;
+    }
+
+    /**
+     * Detect the current animation style from the colour rows it exposes.
+     * The app never changes the selected style; it only adapts to it.
+     *   Arrow 3      -> fill_color + arrow_color
+     *   Curved line  -> fill_color + arrow_color + stroke_color (outline, ignored)
+     *   Arrow 1/2    -> no colour rows at all
+     */
+    private static String detectStyle(List<Nd> ui) {
+        boolean fill = byId(ui, "fill_color") != null;
+        boolean arrow = byId(ui, "arrow_color") != null;
+        boolean stroke = byId(ui, "stroke_color") != null;
+        if (fill && arrow && stroke) return "Curved line";
+        if (fill && arrow) return "Arrow 3";
+        if (!fill && !arrow) return "Arrow 1/2";
+        return "unknown";
+    }
+
+    /** Exact style name from the checked radio (uiautomator dump, error path only). */
+    private String checkedStyleName() {
+        try {
+            List<Nd> ui = dumpUi();
+            String[] ids = {"radio_arrow1", "radio_arrow2", "radio_arrow3", "radio_curve"};
+            String[] names = {"Arrow 1", "Arrow 2", "Arrow 3", "Curved line"};
+            for (int i = 0; i < ids.length; i++) {
+                Nd n = byId(ui, ids[i]);
+                if (n != null && n.checked) return names[i];
+            }
+        } catch (Exception ignored) {
+        }
         return null;
     }
 
@@ -793,11 +827,19 @@ public class MainActivity extends Activity {
         expect("SGPAnimationStyleActivity");
         pause(400);
 
-        // 4. Fill / Arrow colour row
+        // 4. Fill / Arrow colour row (detect the current style; never change it)
         step("Opening " + (fill ? "Fill" : "Arrow") + " color picker\u2026");
         ui = dumpUiTop("SGPAnimationStyleActivity");
+        String style = detectStyle(ui);
+        log("Animation style: " + style);
         Nd row = byId(ui, fill ? "fill_color" : "arrow_color");
-        if (row == null) throw new Exception("colour row not found");
+        if (row == null) {
+            String exact = checkedStyleName();
+            if (exact != null) style = exact;
+            throw new Exception("Animation style \"" + style
+                    + "\" has no Fill/Arrow color; switch to Arrow 3 or Curved line"
+                    + " (the app does not change the style)");
+        }
         Nd swatchRow = row;
         tap(row.cx(), row.cy());
         if (!waitForActivity(ACT_PICK, 6000)) log("  warning: picker not focused");
@@ -882,9 +924,12 @@ public class MainActivity extends Activity {
             expect("SGPAnimationStyleActivity");
             pause(450);
 
-            // 9. verify swatch
-            Bitmap shot = screenshot();
-            got = sampleSwatch(shot, swatchRow);
+            // 9. verify swatch. Arrow 3 keeps its preview stale until the
+            // Animation screen is re-entered, so refresh it first.
+            if ("Arrow 3".equals(style)) {
+                swatchRow = refreshAnimationScreen(fill);
+            }
+            got = verifySwatch(swatchRow, rgb);
             log(String.format(Locale.US, "9) swatch rgb=(%d,%d,%d) target=(%d,%d,%d)",
                     got[0], got[1], got[2], rgb[0], rgb[1], rgb[2]));
 
@@ -1047,8 +1092,16 @@ public class MainActivity extends Activity {
         pause(400);
 
         ui = dumpUiTop("SGPAnimationStyleActivity");
+        String style = detectStyle(ui);
+        log("Calibration animation style: " + style);
         Nd row = byId(ui, "fill_color");
-        if (row == null) throw new Exception("'Fill color' row not found");
+        if (row == null) {
+            String exact = checkedStyleName();
+            if (exact != null) style = exact;
+            throw new Exception("Calibration needs a color picker, but animation style \""
+                    + style + "\" has no Fill/Arrow color; switch to Arrow 3 or Curved line"
+                    + " (the app does not change the style)");
+        }
         status("Opening color picker\u2026");
         tap(row.cx(), row.cy());
         waitForActivity(ACT_PICK, 6000);
@@ -1195,6 +1248,70 @@ public class MainActivity extends Activity {
             if (bestScore > 4) px = best;
         }
         return px;
+    }
+
+    /**
+     * Sample the swatch until the picker's dismiss animation no longer covers it.
+     * Arrow 3's colour rows sit lower than the picker's top edge, so the first
+     * frame after Done can still show the picker panel. Retry until the sample is
+     * close to the target (or a short budget expires).
+     */
+    private int[] verifySwatch(Nd row, int[] target) throws Exception {
+        int[] last = null;
+        for (int i = 0; i < 3; i++) {
+            Bitmap shot = screenshot();
+            last = sampleSwatch(shot, row);
+            int diff = Math.max(Math.abs(last[0] - target[0]),
+                    Math.max(Math.abs(last[1] - target[1]), Math.abs(last[2] - target[2])));
+            log(String.format(Locale.US, "  verify[%d] rgb=(%d,%d,%d) diff=%d",
+                    i, last[0], last[1], last[2], diff));
+            if (diff <= 12) return last;
+            pause(300);
+        }
+        return last;
+    }
+
+    /**
+     * Arrow 3 keeps its colour preview stale after the picker closes. Go back to
+     * Advanced and re-enter Animation to force a refresh, then return the new row.
+     */
+    private Nd refreshAnimationScreen(boolean fill) throws Exception {
+        log("  refreshing Animation preview\u2026");
+        // Let the picker-close transition settle, then go back with the
+        // action-bar arrow (a global Back can be swallowed mid-transition).
+        pause(400);
+        boolean reached = false;
+        for (int attempt = 0; attempt < 3 && !reached; attempt++) {
+            if (attempt == 0) {
+                List<Nd> cur = dumpUiTop("SGPAnimationStyleActivity");
+                Nd back = byId(cur, "action_bar_back");
+                if (back != null) tap(back.cx(), back.cy());
+                else sh("input keyevent KEYCODE_BACK");
+            } else {
+                sh("input keyevent KEYCODE_BACK");
+            }
+            reached = waitForActivity("SGPMoreSettingActivity", 4000);
+            if (!reached) pause(400);
+        }
+        if (!reached)
+            throw new Exception("could not return to Advanced settings to refresh the preview");
+        expect("SGPMoreSettingActivity");
+        pause(300);
+        List<Nd> ui = dumpUiTop("SGPMoreSettingActivity");
+        Nd anim = byId(ui, "arrow_animation");
+        if (anim == null) throw new Exception("'Animation' row gone on refresh");
+        Nd sw = byId(ui, "main_switch");
+        int ax = anim.l + (int) (anim.w() * 0.35);
+        if (sw != null && ax > sw.l - 40) ax = sw.l - 80;
+        tap(ax, anim.cy());
+        if (!waitForActivity("SGPAnimationStyleActivity", 6000))
+            log("  warning: animation not focused on refresh");
+        expect("SGPAnimationStyleActivity");
+        pause(400);
+        List<Nd> ui2 = dumpUiTop("SGPAnimationStyleActivity");
+        Nd row = byId(ui2, fill ? "fill_color" : "arrow_color");
+        if (row == null) throw new Exception("colour row gone on refresh");
+        return row;
     }
 
     // =====================================================================
