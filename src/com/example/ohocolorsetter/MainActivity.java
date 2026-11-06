@@ -26,6 +26,7 @@ import android.widget.LinearLayout;
 import android.widget.RadioButton;
 import android.widget.RadioGroup;
 import android.widget.ScrollView;
+import android.widget.SeekBar;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -65,6 +66,10 @@ public class MainActivity extends Activity {
     static final double DEF_XH0 = 0.1253, DEF_XH1 = 0.8901;
     static final double DEF_YS0 = 0.0533, DEF_YS1 = 0.9378;
     static final String PREFS = "oho_calib";
+    static final String SETTINGS = "oho_settings";
+
+    // ---- speed presets ----
+    static final int SPEED_SLOW = 0, SPEED_NORMAL = 1, SPEED_FAST = 2;
 
     private double calXH0 = DEF_XH0, calXH1 = DEF_XH1;
     private double calYS0 = DEF_YS0, calYS1 = DEF_YS1;
@@ -84,12 +89,20 @@ public class MainActivity extends Activity {
     private final Handler ui = new Handler(Looper.getMainLooper());
     private volatile boolean busy = false;
 
+    private SeekBar speedBar;
+    private TextView speedLabel;
+    private volatile int speed = SPEED_NORMAL;      // user setting (apply flow)
+    private volatile int flowSpeed = SPEED_NORMAL;  // snapshot used by the running flow
+    private volatile boolean speedHint = false;
+
     // =====================================================================
     // UI
     // =====================================================================
     @Override
     protected void onCreate(Bundle b) {
         super.onCreate(b);
+
+        loadSpeed();
 
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
@@ -124,6 +137,39 @@ public class MainActivity extends Activity {
         targetGroup.addView(arrow);
         targetGroup.check(1001);
         root.addView(targetGroup);
+
+        TextView speedTitle = new TextView(this);
+        speedTitle.setText("Speed");
+        speedTitle.setPadding(0, pad / 2, 0, 0);
+        root.addView(speedTitle);
+
+        speedLabel = new TextView(this);
+        speedLabel.setTextSize(14);
+        root.addView(speedLabel);
+
+        speedBar = new SeekBar(this);
+        speedBar.setMax(SPEED_FAST);
+        speedBar.setProgress(speed);
+        speedBar.setKeyProgressIncrement(1);
+        speedBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar bar, int progress, boolean fromUser) {
+                speed = progress;
+                updateSpeedLabel();
+                if (fromUser) saveSpeed(progress);
+            }
+
+            @Override public void onStartTrackingTouch(SeekBar bar) {}
+
+            @Override public void onStopTrackingTouch(SeekBar bar) {}
+        });
+        root.addView(speedBar);
+
+        TextView speedNote = new TextView(this);
+        speedNote.setTextSize(11);
+        speedNote.setText("Slow = safest  \u2022  Normal = default  \u2022  Fast = quicker, may fail on a laggy device");
+        root.addView(speedNote);
+        updateSpeedLabel();
 
         applyBtn = new Button(this);
         applyBtn.setText("Apply");
@@ -183,8 +229,16 @@ public class MainActivity extends Activity {
         String tg = it.getStringExtra("target");
         boolean auto = it.getBooleanExtra("auto", false);
         boolean cal = it.getBooleanExtra("calibrate", false);
-        if (hx != null || tg != null || auto || cal) {
-            log("intent: hex=" + hx + " target=" + tg + " auto=" + auto + " calibrate=" + cal);
+        int sp = it.getIntExtra("speed", -1);
+        if (sp >= SPEED_SLOW && sp <= SPEED_FAST) {
+            speed = sp;
+            saveSpeed(sp);
+            if (speedBar != null) speedBar.setProgress(sp);
+            updateSpeedLabel();
+        }
+        if (hx != null || tg != null || auto || cal || sp >= 0) {
+            log("intent: hex=" + hx + " target=" + tg + " auto=" + auto
+                    + " calibrate=" + cal + " speed=" + speedName(speed));
         }
         if (hx != null && !hx.isEmpty()) {
             if (!hx.startsWith("#")) hx = "#" + hx;
@@ -237,8 +291,11 @@ public class MainActivity extends Activity {
         final boolean fill = targetGroup.getCheckedRadioButtonId() == 1001;
 
         busy = true;
+        flowSpeed = speed;   // slider applies to Apply only
+        log("Apply flow speed: " + speedName(flowSpeed));
         applyBtn.setEnabled(false);
         calibBtn.setEnabled(false);
+        if (speedBar != null) speedBar.setEnabled(false);
         step("Applying " + h + " to " + (fill ? "Fill" : "Arrow") + "\u2026");
         lastResult = "Done \u2014 " + h + " applied";
 
@@ -248,6 +305,7 @@ public class MainActivity extends Activity {
             } catch (Throwable t) {
                 log("ERROR: " + t);
                 lastResult = "Failed: " + t.getMessage();
+                noteSpeedHint(t.getMessage());
                 StackTraceElement[] st = t.getStackTrace();
                 for (int i = 0; i < Math.min(4, st.length); i++) log("  at " + st[i]);
             } finally {
@@ -257,6 +315,7 @@ public class MainActivity extends Activity {
                 ui.post(() -> {
                     applyBtn.setEnabled(true);
                     calibBtn.setEnabled(true);
+                    if (speedBar != null) speedBar.setEnabled(true);
                 });
                 log("=== done ===");
             }
@@ -266,8 +325,12 @@ public class MainActivity extends Activity {
     private void startCalibration() {
         if (busy) return;
         busy = true;
+        flowSpeed = SPEED_NORMAL;   // calibration always uses the default preset
+        log("Calibration flow speed: " + speedName(flowSpeed)
+                + " (slider: " + speedName(speed) + ")");
         applyBtn.setEnabled(false);
         calibBtn.setEnabled(false);
+        if (speedBar != null) speedBar.setEnabled(false);
         step("Calibrating this device\u2026");
         lastResult = "Calibration done";
 
@@ -277,6 +340,7 @@ public class MainActivity extends Activity {
             } catch (Throwable t) {
                 log("CALIBRATION ERROR: " + t);
                 lastResult = "Calibration failed: " + t.getMessage();
+                noteSpeedHint(t.getMessage());
                 StackTraceElement[] st = t.getStackTrace();
                 for (int i = 0; i < Math.min(4, st.length); i++) log("  at " + st[i]);
             } finally {
@@ -286,6 +350,7 @@ public class MainActivity extends Activity {
                 ui.post(() -> {
                     applyBtn.setEnabled(true);
                     calibBtn.setEnabled(true);
+                    if (speedBar != null) speedBar.setEnabled(true);
                 });
                 log("=== calibration finished ===");
             }
@@ -334,7 +399,7 @@ public class MainActivity extends Activity {
         if (exp == null) return;
         String s = sh("dumpsys window | grep mCurrentFocus");
         if (!s.contains(exp)) {
-            sleep(200);
+            sleep(pollMs());
             s = sh("dumpsys window | grep mCurrentFocus");
             if (!s.contains(exp)) {
                 String where = s.replace("mCurrentFocus=", "").trim();
@@ -360,12 +425,36 @@ public class MainActivity extends Activity {
         try { Thread.sleep(ms); } catch (InterruptedException ignored) {}
     }
 
+    /**
+     * Pause scaled by the running flow's preset. Fast is the old Normal
+     * timing; Normal and Slow step up gradually from it (150 ms floor).
+     */
+    private void pause(long normalMs) {
+        long ms = normalMs;
+        if (flowSpeed == SPEED_SLOW) ms = Math.round(normalMs * 1.6);
+        else if (flowSpeed == SPEED_NORMAL) ms = Math.round(normalMs * 1.25);
+        if (ms < 150) ms = 150;
+        sleep(ms);
+    }
+
+    /** Poll interval for focus waits. */
+    private long pollMs() {
+        return flowSpeed == SPEED_SLOW ? 260 : flowSpeed == SPEED_NORMAL ? 200 : 150;
+    }
+
+    /** Swipe duration scaled by the running flow's preset. */
+    private int swipeMs(int normalMs) {
+        if (flowSpeed == SPEED_SLOW) return Math.round(normalMs * 1.6f);
+        if (flowSpeed == SPEED_NORMAL) return Math.round(normalMs * 1.25f);
+        return normalMs;   // Fast
+    }
+
     private boolean waitForActivity(String cls, long timeoutMs) throws Exception {
         long end = System.currentTimeMillis() + timeoutMs;
         while (System.currentTimeMillis() < end) {
             String s = sh("dumpsys window | grep mCurrentFocus");
             if (s.contains(cls)) return true;
-            sleep(200);
+            sleep(pollMs());
         }
         return false;
     }
@@ -407,9 +496,120 @@ public class MainActivity extends Activity {
                     return nodes;
                 }
             }
-            sleep(500);
+            pause(350);
         }
         throw new Exception("uiautomator dump failed");
+    }
+
+    // ---- fast full-screen activity dump (dumpsys activity top) ----
+    private static final Pattern TOP_START =
+            Pattern.compile("^(\\s*)([\\w.$]+)\\{.*$");
+    private static final Pattern TOP_VIEW =
+            Pattern.compile("^(\\s*)([\\w.$]+)\\{([^}]*)\\}.*$");
+    private static final Pattern TOP_BOUNDS =
+            Pattern.compile("(-?\\d+),(-?\\d+)-(-?\\d+),(-?\\d+)");
+    private static final Pattern TOP_ID =
+            Pattern.compile("#\\S+\\s+(?:app|android):id/([\\w.]+)");
+
+    /**
+     * Read a full-screen activity's view hierarchy from `dumpsys activity top`
+     * (~0.2 s) instead of `uiautomator dump` (~2.5 s). Bounds in the dump are
+     * relative to each parent, so offsets are accumulated down the tree.
+     * The colour picker is a dialog window, so it still uses {@link #dumpUi()}.
+     */
+    private List<Nd> dumpUiTop(String activityCls) throws Exception {
+        checkFocus();
+        String dump = sh("dumpsys activity top");
+        checkFocus();
+        List<Nd> nodes = parseTopHierarchy(dump, activityCls);
+        if (nodes.isEmpty()) {
+            log("  dumpsys hierarchy empty for " + activityCls + " - falling back");
+            return dumpUi();
+        }
+        return nodes;
+    }
+
+    private static List<Nd> parseTopHierarchy(String dump, String activityCls) {
+        String[] lines = dump.split("\\r?\\n", -1);
+        int start = -1;
+        for (int i = 0; i < lines.length; i++) {
+            if (lines[i].contains("[" + activityCls + "]")) start = i;
+        }
+        List<Nd> out = new ArrayList<>();
+        if (start < 0) return out;
+
+        // Collect view records, joining lines that the dump wrapped.
+        List<String> recs = new ArrayList<>();
+        List<Integer> inds = new ArrayList<>();
+        StringBuilder cur = null;
+        int curIndent = 0;
+        for (int i = start; i < lines.length; i++) {
+            String line = lines[i];
+            if (cur != null && cur.indexOf("}") < 0) {
+                cur.append(line.trim());              // wrapped continuation
+            } else if (TOP_START.matcher(line).matches()) {
+                cur = new StringBuilder(line);
+                curIndent = leadingSpaces(line);
+            } else {
+                break;                                // end of this activity's hierarchy
+            }
+            if (cur != null && cur.indexOf("}") >= 0) {
+                recs.add(cur.toString());
+                inds.add(curIndent);
+                cur = null;
+            }
+        }
+
+        // Accumulate parent offsets (bounds in the dump are parent-relative).
+        List<int[]> stack = new ArrayList<>();        // {indent, absLeft, absTop}
+        for (int i = 0; i < recs.size(); i++) {
+            Matcher m = TOP_VIEW.matcher(recs.get(i));
+            if (!m.matches()) continue;
+            String cls = m.group(2);
+            String body = m.group(3);
+            Matcher bm = TOP_BOUNDS.matcher(body);
+            if (!bm.find()) continue;
+            int l = Integer.parseInt(bm.group(1));
+            int t = Integer.parseInt(bm.group(2));
+            int r = Integer.parseInt(bm.group(3));
+            int b = Integer.parseInt(bm.group(4));
+
+            int indent = inds.get(i);
+            while (!stack.isEmpty() && stack.get(stack.size() - 1)[0] >= indent)
+                stack.remove(stack.size() - 1);
+            int pl = 0, pt = 0;
+            if (!stack.isEmpty()) {
+                int[] p = stack.get(stack.size() - 1);
+                pl = p[1];
+                pt = p[2];
+            }
+            int al = pl + l, at = pt + t, ar = pl + r, ab = pt + b;
+            stack.add(new int[]{indent, al, at});
+
+            // First token after the hash is the view state: G = gone, I = invisible.
+            String before = body.substring(0, bm.start()).trim();
+            String[] toks = before.split("\\s+");
+            String vis = toks.length >= 2 ? toks[1] : "V";
+            if (vis.startsWith("G") || vis.startsWith("I")) continue;
+            if (ar <= al || ab <= at) continue;
+
+            Nd n = new Nd();
+            n.cls = cls;
+            n.l = al;
+            n.t = at;
+            n.r = ar;
+            n.b = ab;
+            Matcher im = TOP_ID.matcher(body);
+            if (im.find()) n.id = im.group(1);
+            out.add(n);
+        }
+        return out;
+    }
+
+    private static int leadingSpaces(String s) {
+        int i = 0;
+        while (i < s.length() && s.charAt(i) == ' ') i++;
+        return i;
     }
 
     private static List<Nd> parseXml(String xml) throws Exception {
@@ -568,21 +768,21 @@ public class MainActivity extends Activity {
         if (!waitForActivity(ACT_MAIN.substring(ACT_MAIN.indexOf('/') + 1), 6000))
             log("  warning: main activity not focused yet");
         expect("SGPSettingsActivity");
-        sleep(700);
+        pause(450);
 
         // 2. Advanced settings
         step("Navigating to Advanced settings\u2026");
-        List<Nd> ui = dumpUi();
+        List<Nd> ui = dumpUiTop("SGPSettingsActivity");
         Nd adv = byId(ui, "detail_setting");
         if (adv == null) throw new Exception("'Advanced settings' row not found");
         tap(adv.cx(), adv.cy());
         if (!waitForActivity(ACT_ADV, 6000)) log("  warning: advanced activity not focused");
         expect("SGPMoreSettingActivity");
-        sleep(600);
+        pause(400);
 
         // 3. Animation row (tap title, left of the switch)
         step("Opening Animation settings\u2026");
-        ui = dumpUi();
+        ui = dumpUiTop("SGPMoreSettingActivity");
         Nd anim = byId(ui, "arrow_animation");
         if (anim == null) throw new Exception("'Animation' row not found");
         Nd sw = byId(ui, "main_switch");
@@ -591,18 +791,18 @@ public class MainActivity extends Activity {
         tap(ax, anim.cy());
         if (!waitForActivity(ACT_ANIM, 6000)) log("  warning: animation activity not focused");
         expect("SGPAnimationStyleActivity");
-        sleep(600);
+        pause(400);
 
         // 4. Fill / Arrow colour row
         step("Opening " + (fill ? "Fill" : "Arrow") + " color picker\u2026");
-        ui = dumpUi();
+        ui = dumpUiTop("SGPAnimationStyleActivity");
         Nd row = byId(ui, fill ? "fill_color" : "arrow_color");
         if (row == null) throw new Exception("colour row not found");
         Nd swatchRow = row;
         tap(row.cx(), row.cy());
         if (!waitForActivity(ACT_PICK, 6000)) log("  warning: picker not focused");
         expect("SGPColorPickerActivity");
-        sleep(700);
+        pause(450);
 
         double corrX = 0, corrY = 0;
         int[] got = null;
@@ -619,7 +819,7 @@ public class MainActivity extends Activity {
                     log("5) switch to Spectrum tab");
                     status("Selecting Spectrum\u2026");
                     tap(tab.cx(), tab.cy());
-                    sleep(600);
+                    pause(400);
                     ui = dumpUi();
                 }
             }
@@ -646,7 +846,7 @@ public class MainActivity extends Activity {
                 x = clamp(x, cont.l + 2, cont.r - 2);
                 y = clamp(y, cont.t + 2, cont.b - 2);
                 tap((int) Math.round(x), (int) Math.round(y));
-                sleep(450);
+                pause(300);
 
                 Bitmap shot = screenshot();
                 int px = shot.getPixel(Math.max(0, sb.r - 6), sb.cy());
@@ -669,22 +869,18 @@ public class MainActivity extends Activity {
             int targetX = sb.l + Math.round((sb.r - sb.l) * (vpct / 100f));
             log("7) brightness " + vpct + "% -> x=" + targetX);
             status("Setting brightness " + vpct + "%\u2026");
-            swipe(sb.r - 6, cy, targetX, cy, 450);
-            sleep(400);
+            swipe(sb.r - 6, cy, targetX, cy, swipeMs(400));
+            pause(250);
 
-            // verify the value field
-            List<Nd> check = dumpUi();
-            Nd field = byId(check, "sesl_color_seek_bar_saturation_value_edit_view");
-            if (field != null) log("   brightness field = '" + field.text + "'");
-            Nd done2 = byId(check, "button1");
-            if (done2 != null) done = done2;
+            // The Done button does not move; the final swatch check verifies the
+            // result, so no extra (slow) UI dump is needed here.
 
             // 8. Done
             step("Saving color\u2026");
             tap(done.cx(), done.cy());
             if (!waitForActivity(ACT_ANIM, 6000)) log("  warning: did not return to animation screen");
             expect("SGPAnimationStyleActivity");
-            sleep(700);
+            pause(450);
 
             // 9. verify swatch
             Bitmap shot = screenshot();
@@ -712,14 +908,14 @@ public class MainActivity extends Activity {
             corrY += dS * (yS1 - yS0);
 
             // reopen the picker for the next attempt
-            ui = dumpUi();
+            ui = dumpUiTop("SGPAnimationStyleActivity");
             Nd row2 = byId(ui, fill ? "fill_color" : "arrow_color");
             if (row2 == null) throw new Exception("colour row gone, cannot retry");
             swatchRow = row2;
             tap(row2.cx(), row2.cy());
             if (!waitForActivity(ACT_PICK, 6000)) log("  warning: picker not focused (retry)");
             expect("SGPColorPickerActivity");
-            sleep(700);
+            pause(450);
         }
 
         throw new Exception("colour did not converge (last rgb=" +
@@ -763,10 +959,51 @@ public class MainActivity extends Activity {
         calibrated = true;
     }
 
+    // =====================================================================
+    // Speed preset
+    // =====================================================================
+    private void loadSpeed() {
+        speed = getSharedPreferences(SETTINGS, MODE_PRIVATE)
+                .getInt("speed", SPEED_NORMAL);
+        if (speed < SPEED_SLOW || speed > SPEED_FAST) speed = SPEED_NORMAL;
+    }
+
+    private void saveSpeed(int s) {
+        getSharedPreferences(SETTINGS, MODE_PRIVATE).edit()
+                .putInt("speed", s).apply();
+        log("Speed preset: " + speedName(s));
+    }
+
+    private static String speedName(int s) {
+        return s == SPEED_SLOW ? "Slow" : s == SPEED_FAST ? "Fast" : "Normal";
+    }
+
+    private void updateSpeedLabel() {
+        if (speedLabel == null) return;
+        speedLabel.setText("Speed: " + speedName(speed));
+        speedLabel.setTextColor(speed == SPEED_FAST ? 0xFFFF6D00 : 0xFF808080);
+    }
+
+    /**
+     * If a Fast run fails, tell the user the preset may be too fast for this
+     * device. Interruptions and Shizuku problems are not speed related.
+     */
+    private void noteSpeedHint(String reason) {
+        if (flowSpeed != SPEED_FAST) return;
+        if (reason != null) {
+            String r = reason.toLowerCase(Locale.US);
+            if (r.contains("interrupt") || r.contains("shizuku")
+                    || r.contains("permission")) return;
+        }
+        speedHint = true;
+        lastResult = lastResult + " \u2014 fast preset may be too fast; try Normal or Slow";
+        log("HINT: Fast preset failed \u2014 this device may be lagging. Reduce speed to Normal or Slow.");
+    }
+
     /** Tap a point in the spectrum square and read H/S back from the brightness bar. */
     private float[] probe(double x, double y, Nd sb) throws Exception {
         tap((int) Math.round(x), (int) Math.round(y));
-        sleep(450);
+        pause(300);
         Bitmap shot = screenshot();
         int px = shot.getPixel(Math.max(0, sb.r - 6), sb.cy());
         return rgbToHsv(Color.red(px), Color.green(px), Color.blue(px));
@@ -786,18 +1023,18 @@ public class MainActivity extends Activity {
         sh("am start -W -n " + ACT_MAIN + " --activity-clear-top");
         waitForActivity(ACT_MAIN.substring(ACT_MAIN.indexOf('/') + 1), 6000);
         expect("SGPSettingsActivity");
-        sleep(700);
+        pause(450);
 
-        List<Nd> ui = dumpUi();
+        List<Nd> ui = dumpUiTop("SGPSettingsActivity");
         Nd adv = byId(ui, "detail_setting");
         if (adv == null) throw new Exception("'Advanced settings' row not found");
         status("Navigating to Advanced settings\u2026");
         tap(adv.cx(), adv.cy());
         waitForActivity(ACT_ADV, 6000);
         expect("SGPMoreSettingActivity");
-        sleep(600);
+        pause(400);
 
-        ui = dumpUi();
+        ui = dumpUiTop("SGPMoreSettingActivity");
         Nd anim = byId(ui, "arrow_animation");
         if (anim == null) throw new Exception("'Animation' row not found");
         Nd sw = byId(ui, "main_switch");
@@ -807,16 +1044,16 @@ public class MainActivity extends Activity {
         tap(ax, anim.cy());
         waitForActivity(ACT_ANIM, 6000);
         expect("SGPAnimationStyleActivity");
-        sleep(600);
+        pause(400);
 
-        ui = dumpUi();
+        ui = dumpUiTop("SGPAnimationStyleActivity");
         Nd row = byId(ui, "fill_color");
         if (row == null) throw new Exception("'Fill color' row not found");
         status("Opening color picker\u2026");
         tap(row.cx(), row.cy());
         waitForActivity(ACT_PICK, 6000);
         expect("SGPColorPickerActivity");
-        sleep(700);
+        pause(450);
 
         ui = dumpUi();
         if (byId(ui, "sesl_color_picker_color_spectrum_view_container") == null) {
@@ -825,7 +1062,7 @@ public class MainActivity extends Activity {
             if (tab == null) throw new Exception("Spectrum tab not found");
             status("Selecting Spectrum\u2026");
             tap(tab.cx(), tab.cy());
-            sleep(600);
+            pause(400);
             ui = dumpUi();
         }
 
@@ -905,11 +1142,12 @@ public class MainActivity extends Activity {
         }
         waitForActivity(ACT_ANIM, 5000);
         expect("SGPAnimationStyleActivity");
-        sleep(400);
+        pause(250);
 
         if (Math.abs(dH) > 10 || Math.abs(dS) > 0.06) {
             log("Calibration FAILED verification - not saved. Keep the screen still and retry.");
             lastResult = "Calibration failed \u2014 retry";
+            noteSpeedHint(null);
             status(lastResult);
             return;
         }
@@ -981,7 +1219,7 @@ public class MainActivity extends Activity {
         try {
             if (!Settings.canDrawOverlays(this)) {
                 sh("appops set " + getPackageName() + " SYSTEM_ALERT_WINDOW allow");
-                sleep(400);
+                pause(250);
             }
         } catch (Throwable t) {
             log("overlay grant failed: " + t);
@@ -1058,7 +1296,9 @@ public class MainActivity extends Activity {
     /** Show the final result briefly, then remove the overlay. */
     private void finishOverlay(String msg) {
         showOverlay(msg);
-        ui.postDelayed(this::hideOverlay, 1800);
+        long ms = speedHint ? 5000 : 1800;
+        speedHint = false;
+        ui.postDelayed(this::hideOverlay, ms);
     }
 
     /** Bring this app back to the foreground after driving another app. */
