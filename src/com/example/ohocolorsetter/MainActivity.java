@@ -75,8 +75,6 @@ public class MainActivity extends Activity {
     private double calYS0 = DEF_YS0, calYS1 = DEF_YS1;
     private boolean calibrated = false;
 
-    private EditText hexInput;
-    private RadioGroup targetGroup;
     private TextView logView;
     private Button applyBtn;
     private Button calibBtn;
@@ -95,6 +93,193 @@ public class MainActivity extends Activity {
     private volatile int flowSpeed = SPEED_NORMAL;  // snapshot used by the running flow
     private volatile boolean speedHint = false;
 
+    // ---- per-colour sections (Material You vs Custom) ----
+    private ColorSection fillSection, arrowSection;
+    private volatile boolean materialFillOk = false, materialArrowOk = false;
+    private volatile int materialFill = 0, materialArrow = 0;
+    private volatile boolean materialFetching = false;
+    private int materialRetry = 0;
+    private volatile int lastSwatchDiff = 999;
+
+    static class ColorSection {
+        RadioGroup modeGroup;
+        EditText input;
+        TextView materialView;
+        View swatch;
+        volatile boolean materialMode = true;
+        String key;
+    }
+
+    private int dp(int v) {
+        return Math.round(v * getResources().getDisplayMetrics().density);
+    }
+
+    private ColorSection addColorSection(LinearLayout root, String title, String key,
+                                         int materialId, int customId, String defaultCustom) {
+        ColorSection s = new ColorSection();
+        s.key = key;
+
+        TextView h = new TextView(this);
+        h.setText(title);
+        h.setTextSize(16);
+        h.setTextColor(0xFFFFFFFF);
+        h.setPadding(0, dp(12), 0, 0);
+        root.addView(h);
+
+        s.modeGroup = new RadioGroup(this);
+        s.modeGroup.setOrientation(RadioGroup.HORIZONTAL);
+        RadioButton mat = new RadioButton(this);
+        mat.setText("Material You");
+        mat.setId(materialId);
+        RadioButton cus = new RadioButton(this);
+        cus.setText("Custom");
+        cus.setId(customId);
+        s.modeGroup.addView(mat);
+        s.modeGroup.addView(cus);
+        root.addView(s.modeGroup);
+
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        s.swatch = new View(this);
+        row.addView(s.swatch, new LinearLayout.LayoutParams(dp(32), dp(32)));
+        s.materialView = new TextView(this);
+        s.materialView.setTextSize(13);
+        s.materialView.setPadding(dp(12), 0, 0, 0);
+        s.materialView.setText("Material You: loading\u2026");
+        row.addView(s.materialView);
+        root.addView(row);
+
+        s.input = new EditText(this);
+        s.input.setHint("#RRGGBB or #AARRGGBB");
+        s.input.setInputType(InputType.TYPE_CLASS_TEXT);
+        s.input.setText(loadCustom(key, defaultCustom));
+        root.addView(s.input);
+
+        boolean matMode = loadMode(key, true);
+        s.materialMode = matMode;
+        s.modeGroup.check(matMode ? materialId : customId);
+        s.input.setEnabled(!matMode);
+        s.modeGroup.setOnCheckedChangeListener((g, id) -> {
+            s.materialMode = id == materialId;
+            s.input.setEnabled(!s.materialMode);
+            saveMode(key, s.materialMode);
+        });
+        return s;
+    }
+
+    private String loadCustom(String key, String def) {
+        return getSharedPreferences(SETTINGS, MODE_PRIVATE).getString(key + "_custom", def);
+    }
+
+    private void saveCustom(String key, String value) {
+        getSharedPreferences(SETTINGS, MODE_PRIVATE).edit()
+                .putString(key + "_custom", value).apply();
+    }
+
+    private boolean loadMode(String key, boolean def) {
+        return getSharedPreferences(SETTINGS, MODE_PRIVATE).getBoolean(key + "_material", def);
+    }
+
+    private void saveMode(String key, boolean material) {
+        getSharedPreferences(SETTINGS, MODE_PRIVATE).edit()
+                .putBoolean(key + "_material", material).apply();
+    }
+
+    private void setSwatch(View v, int color) {
+        GradientDrawable d = new GradientDrawable();
+        d.setShape(GradientDrawable.OVAL);
+        d.setColor(color);
+        d.setStroke(2, 0xFF777777);
+        v.setBackground(d);
+    }
+
+    private void updateMaterialViews() {
+        ui.post(() -> {
+            if (fillSection == null || arrowSection == null) return;
+            if (materialFillOk) {
+                fillSection.materialView.setText("Material You: " + colorToHex(materialFill));
+                setSwatch(fillSection.swatch, materialFill);
+            } else {
+                fillSection.materialView.setText("Material You: unavailable");
+            }
+            if (materialArrowOk) {
+                arrowSection.materialView.setText("Material You: " + colorToHex(materialArrow));
+                setSwatch(arrowSection.swatch, materialArrow);
+            } else {
+                arrowSection.materialView.setText("Material You: unavailable");
+            }
+        });
+    }
+
+    /** Reads the two theme colours from the system and forces 100% alpha. */
+    private void fetchMaterialColors() {
+        if (materialFetching) return;
+        materialFetching = true;
+        new Thread(() -> {
+            try {
+                if (!waitForShizuku(5000)) {
+                    log("Material You: Shizuku not running");
+                    return;
+                }
+                if (Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED) {
+                    log("Material You: Shizuku permission not granted");
+                    return;
+                }
+                String f = sh("cmd overlay lookup --user 0 android android:color/system_secondary_container_dark").trim();
+                String a = sh("cmd overlay lookup --user 0 android android:color/system_on_secondary_container_dark").trim();
+                Integer fc = parseMaterialColor(f);
+                Integer ac = parseMaterialColor(a);
+                if (fc == null || ac == null) {
+                    log("Material You: unexpected output fill='" + f + "' arrow='" + a + "'");
+                    return;
+                }
+                materialFill = fc;
+                materialArrow = ac;
+                materialFillOk = true;
+                materialArrowOk = true;
+                materialRetry = 0;
+                log("Material You: fill=" + colorToHex(fc) + " arrow=" + colorToHex(ac));
+                updateMaterialViews();
+            } catch (Throwable t) {
+                log("Material You lookup failed: " + t);
+            } finally {
+                materialFetching = false;
+                updateMaterialViews();
+            }
+        }).start();
+    }
+
+    private static Integer parseMaterialColor(String s) {
+        if (s == null) return null;
+        s = s.trim();
+        if (s.isEmpty()) return null;
+        if (!s.startsWith("#")) s = "#" + s;
+        Integer c = parseColor(s);
+        if (c == null) return null;
+        return 0xFF000000 | (c & 0xFFFFFF);   // Material You always starts at 100% alpha
+    }
+
+    /** Parse #RRGGBB or #AARRGGBB (alpha first); 6 digits default to FF alpha. */
+    private static Integer parseColor(String s) {
+        if (s == null) return null;
+        s = s.trim();
+        if (s.startsWith("#")) s = s.substring(1);
+        if (s.length() == 6 && s.matches("[0-9a-fA-F]{6}")) {
+            return 0xFF000000 | (int) Long.parseLong(s, 16);
+        }
+        if (s.length() == 8 && s.matches("[0-9a-fA-F]{8}")) {
+            return (int) Long.parseLong(s, 16);
+        }
+        return null;
+    }
+
+    private static String colorToHex(int c) {
+        int a = (c >>> 24) & 0xFF;
+        if (a == 0xFF) return String.format(java.util.Locale.US, "#%06X", c & 0xFFFFFF);
+        return String.format(java.util.Locale.US, "#%08X", c);
+    }
+
     // =====================================================================
     // UI
     // =====================================================================
@@ -106,37 +291,29 @@ public class MainActivity extends Activity {
 
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        int pad = (int) (16 * getResources().getDisplayMetrics().density);
+        final int pad = (int) (16 * getResources().getDisplayMetrics().density);
         root.setPadding(pad, pad, pad, pad);
+        // Android 15+ draws edge-to-edge; keep the content below the status bar.
+        root.setOnApplyWindowInsetsListener((v, insets) -> {
+            int top = insets.getSystemWindowInsetTop();
+            v.setPadding(pad, pad + top, pad, pad);
+            return insets;
+        });
 
         TextView title = new TextView(this);
         title.setText("OHO+ Color Setter");
         title.setTextSize(20);
+        title.setTextColor(0xFFFFFFFF);
         root.addView(title);
 
         TextView hint = new TextView(this);
-        hint.setText("Hex color (#RRGGBB)");
+        hint.setText("Applies Fill and Arrow together. Material You is read from the system theme.");
+        hint.setTextSize(12);
         hint.setPadding(0, pad / 2, 0, 0);
         root.addView(hint);
 
-        hexInput = new EditText(this);
-        hexInput.setHint("#473646");
-        hexInput.setText("#473646");
-        hexInput.setInputType(InputType.TYPE_CLASS_TEXT);
-        root.addView(hexInput);
-
-        targetGroup = new RadioGroup(this);
-        targetGroup.setOrientation(RadioGroup.HORIZONTAL);
-        RadioButton fill = new RadioButton(this);
-        fill.setText("Fill color");
-        fill.setId(1001);
-        RadioButton arrow = new RadioButton(this);
-        arrow.setText("Arrow color");
-        arrow.setId(1002);
-        targetGroup.addView(fill);
-        targetGroup.addView(arrow);
-        targetGroup.check(1001);
-        root.addView(targetGroup);
+        fillSection = addColorSection(root, "Fill color", "fill", 2001, 2002, "#473646");
+        arrowSection = addColorSection(root, "Arrow color", "arrow", 3001, 3002, "#D1B8CD");
 
         TextView speedTitle = new TextView(this);
         speedTitle.setText("Speed");
@@ -172,7 +349,7 @@ public class MainActivity extends Activity {
         updateSpeedLabel();
 
         applyBtn = new Button(this);
-        applyBtn.setText("Apply");
+        applyBtn.setText("Apply both colors");
         applyBtn.setOnClickListener(v -> startApply());
         root.addView(applyBtn);
 
@@ -197,15 +374,21 @@ public class MainActivity extends Activity {
         setContentView(root);
 
         try {
-            Shizuku.addBinderReceivedListenerSticky(() -> log("Shizuku binder received"));
-            Shizuku.addRequestPermissionResultListener((code, res) ->
-                    log("Permission result: " + (res == PackageManager.PERMISSION_GRANTED ? "GRANTED" : "DENIED(" + res + ")")));
+            Shizuku.addBinderReceivedListenerSticky(() -> {
+                log("Shizuku binder received");
+                fetchMaterialColors();
+            });
+            Shizuku.addRequestPermissionResultListener((code, res) -> {
+                log("Permission result: " + (res == PackageManager.PERMISSION_GRANTED ? "GRANTED" : "DENIED(" + res + ")"));
+                if (res == PackageManager.PERMISSION_GRANTED) fetchMaterialColors();
+            });
         } catch (Throwable t) {
             log("Shizuku listener error: " + t);
         }
 
         log("Ready. Shizuku running: " + safePing());
         loadCalibration();
+        fetchMaterialColors();
 
         applyIntent(getIntent());
     }
@@ -227,6 +410,10 @@ public class MainActivity extends Activity {
         if (it == null) return;
         String hx = it.getStringExtra("hex");
         String tg = it.getStringExtra("target");
+        String fillExtra = it.getStringExtra("fill");
+        String arrowExtra = it.getStringExtra("arrow");
+        boolean fillMat = it.getBooleanExtra("fillMaterial", false);
+        boolean arrowMat = it.getBooleanExtra("arrowMaterial", false);
         boolean auto = it.getBooleanExtra("auto", false);
         boolean cal = it.getBooleanExtra("calibrate", false);
         int sp = it.getIntExtra("speed", -1);
@@ -236,21 +423,42 @@ public class MainActivity extends Activity {
             if (speedBar != null) speedBar.setProgress(sp);
             updateSpeedLabel();
         }
-        if (hx != null || tg != null || auto || cal || sp >= 0) {
-            log("intent: hex=" + hx + " target=" + tg + " auto=" + auto
-                    + " calibrate=" + cal + " speed=" + speedName(speed));
+
+        if (fillExtra != null) {
+            fillSection.modeGroup.check(2002);
+            fillSection.input.setText(fillExtra);
+        } else if (fillMat) {
+            fillSection.modeGroup.check(2001);
         }
+        if (arrowExtra != null) {
+            arrowSection.modeGroup.check(3002);
+            arrowSection.input.setText(arrowExtra);
+        } else if (arrowMat) {
+            arrowSection.modeGroup.check(3001);
+        }
+
+        // Backward-compatible single-colour intent: --es hex --es target fill|arrow
         if (hx != null && !hx.isEmpty()) {
-            if (!hx.startsWith("#")) hx = "#" + hx;
-            hexInput.setText(hx);
+            if ("arrow".equalsIgnoreCase(tg)) {
+                arrowSection.modeGroup.check(3002);
+                arrowSection.input.setText(hx);
+            } else {
+                fillSection.modeGroup.check(2002);
+                fillSection.input.setText(hx);
+            }
         }
-        if ("arrow".equalsIgnoreCase(tg)) targetGroup.check(1002);
-        else if ("fill".equalsIgnoreCase(tg)) targetGroup.check(1001);
+
+        if (hx != null || tg != null || fillExtra != null || arrowExtra != null
+                || fillMat || arrowMat || auto || cal || sp >= 0) {
+            log("intent: fill=" + (fillSection.materialMode ? "MaterialYou" : fillSection.input.getText())
+                    + " arrow=" + (arrowSection.materialMode ? "MaterialYou" : arrowSection.input.getText())
+                    + " auto=" + auto + " calibrate=" + cal + " speed=" + speedName(speed));
+        }
 
         if (cal) {
-            hexInput.postDelayed(this::startCalibration, 900);
+            applyBtn.postDelayed(this::startCalibration, 900);
         } else if (auto) {
-            hexInput.postDelayed(this::startApply, 900);
+            applyBtn.postDelayed(this::startApply, 900);
         }
     }
 
@@ -279,29 +487,63 @@ public class MainActivity extends Activity {
         }
     }
 
+    private Integer resolveColor(ColorSection s, boolean materialOk, int materialColor, String label) {
+        if (s.materialMode) {
+            if (!materialOk) {
+                String msg = "Material You " + label + " color unavailable \u2014 check Shizuku/permission";
+                log(msg);
+                toast(msg);
+                return null;
+            }
+            return materialColor;
+        }
+        String raw = s.input.getText().toString();
+        Integer c = parseColor(raw);
+        if (c == null) {
+            String msg = "Invalid " + label + " color \"" + raw + "\" \u2014 use #RRGGBB or #AARRGGBB";
+            log(msg);
+            toast(msg);
+            return null;
+        }
+        return c;
+    }
+
     private void startApply() {
         if (busy) return;
-        String hex = hexInput.getText().toString().trim();
-        if (!hex.startsWith("#")) hex = "#" + hex;
-        if (!hex.matches("#[0-9a-fA-F]{6}")) {
-            log("Invalid hex: " + hex);
-            return;
-        }
-        final String h = hex;
-        final boolean fill = targetGroup.getCheckedRadioButtonId() == 1001;
 
+        // Material You is fetched in the background at startup; wait briefly for it.
+        if ((fillSection.materialMode && !materialFillOk)
+                || (arrowSection.materialMode && !materialArrowOk)) {
+            if (materialRetry < 5) {
+                materialRetry++;
+                log("Waiting for Material You colors\u2026");
+                ui.postDelayed(this::startApply, 800);
+                return;
+            }
+        }
+        materialRetry = 0;
+
+        Integer fillColor = resolveColor(fillSection, materialFillOk, materialFill, "Fill");
+        Integer arrowColor = resolveColor(arrowSection, materialArrowOk, materialArrow, "Arrow");
+        if (fillColor == null || arrowColor == null) return;
+
+        saveCustom("fill", fillSection.input.getText().toString());
+        saveCustom("arrow", arrowSection.input.getText().toString());
+
+        final int fc = fillColor, ac = arrowColor;
         busy = true;
         flowSpeed = speed;   // slider applies to Apply only
         log("Apply flow speed: " + speedName(flowSpeed));
+        log("Fill=" + colorToHex(fc) + " Arrow=" + colorToHex(ac));
         applyBtn.setEnabled(false);
         calibBtn.setEnabled(false);
         if (speedBar != null) speedBar.setEnabled(false);
-        step("Applying " + h + " to " + (fill ? "Fill" : "Arrow") + "\u2026");
-        lastResult = "Done \u2014 " + h + " applied";
+        step("Applying Fill and Arrow\u2026");
+        lastResult = "Done";
 
         new Thread(() -> {
             try {
-                runFlow(h, fill);
+                runFlow(fc, ac);
             } catch (Throwable t) {
                 log("ERROR: " + t);
                 lastResult = "Failed: " + t.getMessage();
@@ -756,11 +998,6 @@ public class MainActivity extends Activity {
         return base;
     }
 
-    static int[] parseHex(String hex) {
-        int c = Color.parseColor(hex);
-        return new int[]{Color.red(c), Color.green(c), Color.blue(c)};
-    }
-
     // =====================================================================
     // Main flow
     // =====================================================================
@@ -775,19 +1012,12 @@ public class MainActivity extends Activity {
         return false;
     }
 
-    private void runFlow(String hex, boolean fill) throws Exception {
+    private void runFlow(int fillColor, int arrowColor) throws Exception {
         if (!waitForShizuku(3000)) throw new Exception("Shizuku is not running");
         if (Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED)
             throw new Exception("Shizuku permission not granted");
 
         prepareOverlay();
-
-        int[] rgb = parseHex(hex);
-        float[] hsv = rgbToHsv(rgb[0], rgb[1], rgb[2]);
-        int vpct = pickVpct(rgb[0], rgb[1], rgb[2]);
-        float H = hsv[0], S = hsv[1];
-        log(String.format(Locale.US, "target rgb=(%d,%d,%d) H=%.1f S=%.3f Vpct=%d",
-                rgb[0], rgb[1], rgb[2], H, S, vpct));
 
         // wake the screen if it is off (harmless if already on)
         try { sh("input keyevent KEYCODE_WAKEUP"); } catch (Exception ignored) {}
@@ -827,19 +1057,42 @@ public class MainActivity extends Activity {
         expect("SGPAnimationStyleActivity");
         pause(400);
 
-        // 4. Fill / Arrow colour row (detect the current style; never change it)
-        step("Opening " + (fill ? "Fill" : "Arrow") + " color picker\u2026");
+        // 4. detect the current style once (never change it)
         ui = dumpUiTop("SGPAnimationStyleActivity");
         String style = detectStyle(ui);
         log("Animation style: " + style);
-        Nd row = byId(ui, fill ? "fill_color" : "arrow_color");
-        if (row == null) {
+        if ("Arrow 1/2".equals(style)) {
             String exact = checkedStyleName();
             if (exact != null) style = exact;
             throw new Exception("Animation style \"" + style
                     + "\" has no Fill/Arrow color; switch to Arrow 3 or Curved line"
                     + " (the app does not change the style)");
         }
+
+        // 5. apply Fill, then Arrow, in the same flow
+        applyOneColor(style, fillColor, true);
+        applyOneColor(style, arrowColor, false);
+
+        lastResult = "Done \u2014 Fill " + colorToHex(fillColor)
+                + " + Arrow " + colorToHex(arrowColor);
+    }
+
+    private void applyOneColor(String style, int color, boolean fill) throws Exception {
+        String name = fill ? "Fill" : "Arrow";
+        int alpha = (color >>> 24) & 0xFF;
+        int[] rgb = {Color.red(color), Color.green(color), Color.blue(color)};
+        float[] hsv = rgbToHsv(rgb[0], rgb[1], rgb[2]);
+        int vpct = pickVpct(rgb[0], rgb[1], rgb[2]);
+        int alphaPct = Math.round(alpha * 100f / 255f);
+        float H = hsv[0], S = hsv[1];
+        log(String.format(Locale.US,
+                "%s target rgb=(%d,%d,%d) H=%.1f S=%.3f Vpct=%d alpha=%d%%",
+                name, rgb[0], rgb[1], rgb[2], H, S, vpct, alphaPct));
+
+        step("Opening " + name + " color picker\u2026");
+        List<Nd> ui = dumpUiTop("SGPAnimationStyleActivity");
+        Nd row = byId(ui, fill ? "fill_color" : "arrow_color");
+        if (row == null) throw new Exception(name + " colour row not found");
         Nd swatchRow = row;
         tap(row.cx(), row.cy());
         if (!waitForActivity(ACT_PICK, 6000)) log("  warning: picker not focused");
@@ -850,9 +1103,9 @@ public class MainActivity extends Activity {
         int[] got = null;
 
         for (int attempt = 1; attempt <= 3; attempt++) {
-            log("-- attempt " + attempt + " --");
+            log("-- " + name + " attempt " + attempt + " --");
 
-            // 5. Spectrum tab
+            // Spectrum tab
             ui = dumpUi();
             if (byId(ui, "sesl_color_picker_color_spectrum_view_container") == null) {
                 Nd tab = byText(ui, "Spectrum");
@@ -868,6 +1121,7 @@ public class MainActivity extends Activity {
 
             Nd cont = byId(ui, "sesl_color_picker_color_spectrum_view_container");
             Nd sb = byId(ui, "sesl_color_picker_saturation_seekbar");
+            Nd op = byId(ui, "sesl_color_picker_opacity_seekbar");
             Nd done = byId(ui, "button1");
             if (cont == null) throw new Exception("spectrum container not found");
             if (sb == null) throw new Exception("brightness seekbar not found");
@@ -881,9 +1135,9 @@ public class MainActivity extends Activity {
             double x = xH0 + (H / 360.0) * (xH1 - xH0) + corrX;
             double y = yS0 + S * (yS1 - yS0) + corrY;
 
-            status("Picking color\u2026");
+            status("Picking " + name + " color\u2026");
 
-            // 6. iterate on hue / saturation using the brightness bar readback
+            // iterate on hue / saturation using the brightness bar readback
             for (int it = 0; it < 4; it++) {
                 x = clamp(x, cont.l + 2, cont.r - 2);
                 y = clamp(y, cont.t + 2, cont.b - 2);
@@ -906,56 +1160,67 @@ public class MainActivity extends Activity {
                 y += dS * (yS1 - yS0);
             }
 
-            // 7. brightness (drag, must be after the square tap)
+            // brightness (drag, must be after the square tap)
             int cy = sb.cy();
             int targetX = sb.l + Math.round((sb.r - sb.l) * (vpct / 100f));
             log("7) brightness " + vpct + "% -> x=" + targetX);
-            status("Setting brightness " + vpct + "%\u2026");
+            status("Setting " + name + " brightness " + vpct + "%\u2026");
             swipe(sb.r - 6, cy, targetX, cy, swipeMs(400));
             pause(250);
 
-            // The Done button does not move; the final swatch check verifies the
-            // result, so no extra (slow) UI dump is needed here.
+            // alpha (opacity bar sits below the brightness bar). The picker
+            // remembers the last opacity, so 100% must be set explicitly too.
+            if (alphaPct >= 100) {
+                resetOpacity(op);
+            } else {
+                log("8) alpha " + alphaPct + "%");
+                status("Setting " + name + " alpha " + alphaPct + "%\u2026");
+                setOpacity(op, alphaPct);
+                // The Done button does not move, so the original node is still valid.
+            }
 
-            // 8. Done
-            step("Saving color\u2026");
+            // Done
+            step("Saving " + name + " color\u2026");
             tap(done.cx(), done.cy());
             if (!waitForActivity(ACT_ANIM, 6000)) log("  warning: did not return to animation screen");
             expect("SGPAnimationStyleActivity");
             pause(450);
 
-            // 9. verify swatch. Arrow 3 keeps its preview stale until the
+            // verify swatch. Arrow 3 keeps its preview stale until the
             // Animation screen is re-entered, so refresh it first.
             if ("Arrow 3".equals(style)) {
                 swatchRow = refreshAnimationScreen(fill);
             }
-            got = verifySwatch(swatchRow, rgb);
-            log(String.format(Locale.US, "9) swatch rgb=(%d,%d,%d) target=(%d,%d,%d)",
-                    got[0], got[1], got[2], rgb[0], rgb[1], rgb[2]));
+            got = verifySwatch(swatchRow, rgb, alphaPct);
+            int diff = lastSwatchDiff;
+            log(String.format(Locale.US,
+                    "%s swatch rgb=(%d,%d,%d) target=(%d,%d,%d) diff=%d",
+                    name, got[0], got[1], got[2], rgb[0], rgb[1], rgb[2], diff));
 
-            int diff = Math.max(Math.abs(got[0] - rgb[0]),
-                    Math.max(Math.abs(got[1] - rgb[1]), Math.abs(got[2] - rgb[2])));
-            if (diff <= 1) {
-                log("SUCCESS (max diff " + diff + ", picker limit)");
-                lastResult = "Done \u2014 " + hex + " applied";
+            int tolerance = alphaPct < 100 ? 6 : 1;
+            if (diff <= tolerance) {
+                log(name + " SUCCESS (max diff " + diff + ")");
                 return;
             }
-            log("  mismatch (max diff " + diff + "), retrying");
-            status("Almost there \u2014 adjusting\u2026");
+            log("  " + name + " mismatch (max diff " + diff + "), retrying");
+            status("Almost there \u2014 adjusting " + name + "\u2026");
 
-            // correct using achieved vs target hue/saturation
-            float[] gotHsv = rgbToHsv(got[0], got[1], got[2]);
-            float dH = H - gotHsv[0];
-            if (dH > 180) dH -= 360;
-            if (dH < -180) dH += 360;
-            float dS = S - gotHsv[1];
-            corrX += dH / (360.0 / (xH1 - xH0));
-            corrY += dS * (yS1 - yS0);
+            // correct using achieved vs target hue/saturation (only meaningful
+            // when the swatch shows the full colour, not an alpha composite)
+            if (alphaPct >= 100) {
+                float[] gotHsv = rgbToHsv(got[0], got[1], got[2]);
+                float dH = H - gotHsv[0];
+                if (dH > 180) dH -= 360;
+                if (dH < -180) dH += 360;
+                float dS = S - gotHsv[1];
+                corrX += dH / (360.0 / (xH1 - xH0));
+                corrY += dS * (yS1 - yS0);
+            }
 
             // reopen the picker for the next attempt
             ui = dumpUiTop("SGPAnimationStyleActivity");
             Nd row2 = byId(ui, fill ? "fill_color" : "arrow_color");
-            if (row2 == null) throw new Exception("colour row gone, cannot retry");
+            if (row2 == null) throw new Exception(name + " colour row gone, cannot retry");
             swatchRow = row2;
             tap(row2.cx(), row2.cy());
             if (!waitForActivity(ACT_PICK, 6000)) log("  warning: picker not focused (retry)");
@@ -963,8 +1228,43 @@ public class MainActivity extends Activity {
             pause(450);
         }
 
-        throw new Exception("colour did not converge (last rgb=" +
+        throw new Exception(name + " colour did not converge (last rgb=" +
                 (got == null ? "null" : got[0] + "," + got[1] + "," + got[2]) + ")");
+    }
+
+    private void resetOpacity(Nd op) throws Exception {
+        if (op == null) return;
+        // A previous custom-alpha run may have left the bar below 100%.
+        // Touch the far right end (the same gesture the brightness bar uses).
+        swipe(op.r - 6, op.cy(), op.r - 2, op.cy(), swipeMs(400));
+        pause(250);
+    }
+
+    private void setOpacity(Nd op, int targetPct) throws Exception {
+        if (op == null) {
+            log("  warning: opacity seekbar not found; alpha stays at 100%");
+            return;
+        }
+        for (int i = 0; i < 2; i++) {
+            int targetX = op.l + Math.round((op.r - op.l) * targetPct / 100f);
+            log("   opacity swipe -> " + targetPct + "% (x=" + targetX + ")");
+            swipe(op.r - 6, op.cy(), targetX, op.cy(), swipeMs(400));
+            pause(250);
+            List<Nd> ui = dumpUi();
+            Nd val = byId(ui, "sesl_color_seek_bar_opacity_value_edit_view");
+            if (val != null) {
+                int actual = parseIntSafe(val.text);
+                log("   opacity field = '" + val.text + "'");
+                if (actual >= 0 && Math.abs(actual - targetPct) <= 1) return;
+            } else {
+                log("   opacity value field not found");
+                return;
+            }
+        }
+    }
+
+    private static int parseIntSafe(String s) {
+        try { return Integer.parseInt(s.trim()); } catch (Exception e) { return -1; }
     }
 
     // =====================================================================
@@ -1038,7 +1338,8 @@ public class MainActivity extends Activity {
         if (reason != null) {
             String r = reason.toLowerCase(Locale.US);
             if (r.contains("interrupt") || r.contains("shizuku")
-                    || r.contains("permission")) return;
+                    || r.contains("permission") || r.contains("animation style")
+                    || r.contains("no fill/arrow")) return;
         }
         speedHint = true;
         lastResult = lastResult + " \u2014 fast preset may be too fast; try Normal or Slow";
@@ -1252,23 +1553,52 @@ public class MainActivity extends Activity {
 
     /**
      * Sample the swatch until the picker's dismiss animation no longer covers it.
-     * Arrow 3's colour rows sit lower than the picker's top edge, so the first
-     * frame after Done can still show the picker panel. Retry until the sample is
-     * close to the target (or a short budget expires).
+     * For alpha < 100% the swatch is composited over the row background, so the
+     * expected value is blended with the background sampled from the same shot.
      */
-    private int[] verifySwatch(Nd row, int[] target) throws Exception {
+    private int[] verifySwatch(Nd row, int[] target, int alphaPct) throws Exception {
         int[] last = null;
         for (int i = 0; i < 3; i++) {
             Bitmap shot = screenshot();
             last = sampleSwatch(shot, row);
-            int diff = Math.max(Math.abs(last[0] - target[0]),
-                    Math.max(Math.abs(last[1] - target[1]), Math.abs(last[2] - target[2])));
+            int diff = swatchDiff(shot, row, last, target, alphaPct);
+            lastSwatchDiff = diff;
             log(String.format(Locale.US, "  verify[%d] rgb=(%d,%d,%d) diff=%d",
                     i, last[0], last[1], last[2], diff));
-            if (diff <= 12) return last;
+            if (diff <= (alphaPct < 100 ? 6 : 12)) return last;
             pause(300);
         }
         return last;
+    }
+
+    private int swatchDiff(Bitmap shot, Nd row, int[] sampled, int[] target, int alphaPct) {
+        if (alphaPct >= 100) return maxDiff(sampled, target);
+        int[] bg = sampleRowBackground(shot, row);
+        int alpha = Math.round(alphaPct * 2.55f);
+        int[] expected = composite(target, alpha, bg);
+        return maxDiff(sampled, expected);
+    }
+
+    private int[] sampleRowBackground(Bitmap bmp, Nd row) {
+        // the top edge of the row is the card background (the title/swatch sit lower)
+        int x = row.l + row.w() / 2;
+        int y = row.t + Math.max(4, row.h() / 12);
+        int c = bmp.getPixel(x, y);
+        return new int[]{Color.red(c), Color.green(c), Color.blue(c)};
+    }
+
+    private static int[] composite(int[] src, int alpha, int[] bg) {
+        int a = Math.max(0, Math.min(255, alpha));
+        return new int[]{
+                (src[0] * a + bg[0] * (255 - a) + 127) / 255,
+                (src[1] * a + bg[1] * (255 - a) + 127) / 255,
+                (src[2] * a + bg[2] * (255 - a) + 127) / 255
+        };
+    }
+
+    private static int maxDiff(int[] a, int[] b) {
+        return Math.max(Math.abs(a[0] - b[0]),
+                Math.max(Math.abs(a[1] - b[1]), Math.abs(a[2] - b[2])));
     }
 
     /**
