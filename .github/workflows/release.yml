@@ -1,0 +1,94 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - '[0-9]+.[0-9]+.[0-9]+'
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Validate tag
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          if [[ ! "$tag" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Tag '$tag' is not a valid version (expected x.y.z)." >&2
+            exit 1
+          fi
+
+      - name: Install Android SDK packages
+        shell: bash
+        run: |
+          if command -v sdkmanager > /dev/null 2>&1; then
+            yes | sdkmanager --licenses > /dev/null 2>&1 || true
+            sdkmanager "platforms;android-35" "build-tools;35.0.0" > /dev/null
+          else
+            echo "sdkmanager not found; using the preinstalled SDK."
+          fi
+
+      - name: Decode signing key
+        shell: bash
+        env:
+          KEYSTORE_BASE64: ${{ secrets.SIGNING_KEYSTORE_BASE64 }}
+        run: |
+          if [ -z "${KEYSTORE_BASE64:-}" ]; then
+            echo "SIGNING_KEYSTORE_BASE64 secret is not set." >&2
+            exit 1
+          fi
+          path="$RUNNER_TEMP/release.keystore"
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$path"
+          echo "KEYSTORE_PATH=$path" >> "$GITHUB_ENV"
+
+      - name: Build release APK
+        shell: bash
+        env:
+          OHO_KEYSTORE_PASSWORD: ${{ secrets.SIGNING_KEYSTORE_PASSWORD }}
+          OHO_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
+          OHO_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          tag="$GITHUB_REF_NAME"
+          IFS='.' read -r major minor patch <<< "$tag"
+          export VERSION_NAME="$tag"
+          export VERSION_CODE=$((10#$major * 10000 + 10#$minor * 100 + 10#$patch))
+
+          sdk_root="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          if [ -n "$sdk_root" ]; then
+            echo "sdk.dir=$sdk_root" > local.properties
+          fi
+
+          chmod +x ./gradlew
+          ./gradlew :app:assembleRelease --no-daemon --stacktrace
+
+          cp app/build/outputs/apk/release/app-release.apk "OhoMonet-$tag.apk"
+
+      - name: Create release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="$GITHUB_REF_NAME"
+          asset="OhoMonet-$tag.apk"
+
+          if gh release view "$tag" > /dev/null 2>&1; then
+            gh release upload "$tag" "$asset" --clobber
+          else
+            gh release create "$tag" "$asset" --title "$tag" --generate-notes
+          fi
