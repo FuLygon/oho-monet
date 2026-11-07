@@ -1,13 +1,37 @@
 <?xml version="1.0" encoding="utf-8"?>
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
-    android:width="108dp"
-    android:height="108dp"
-    android:viewportWidth="108"
-    android:viewportHeight="108">
-    <path
-        android:fillColor="#FFFFFFFF"
-        android:pathData="M42,30 a18,18 0 1,0 0.1,0 z" />
-    <path
-        android:fillColor="#FFFFFFFF"
-        android:pathData="M66,44 a18,18 0 1,0 0.1,0 z" />
+    android:width="432dp"
+    android:height="432dp"
+    android:viewportWidth="432"
+    android:viewportHeight="432">
+    <group>
+        <clip-path
+            android:pathData="M360,72H72V360H360V72Z" />
+        <path
+            android:fillColor="@color/ic_launcher_hand"
+            android:pathData="M248.01,269.34V184.77H258.27C266.52,184.77 274.5,187.71 280.78,193.06C287.05,198.42 291.22,205.83 292.52,213.98L301.35,269.34V314.69H250.1L248.01,269.34Z" />
+        <path
+            android:fillColor="@color/ic_launcher_phone"
+            android:pathData="M258.67,133.32H173.32C163.01,133.32 154.65,141.68 154.65,151.99V280.01C154.65,290.32 163.01,298.68 173.32,298.68H258.67C268.99,298.68 277.35,290.32 277.35,280.01V151.99C277.35,141.68 268.99,133.32 258.67,133.32Z" />
+        <path
+            android:fillColor="@color/ic_launcher_screen"
+            android:pathData="M250.99,149.32H181.01C175.29,149.32 170.66,153.95 170.66,159.67V272.33C170.66,278.05 175.29,282.68 181.01,282.68H250.99C256.71,282.68 261.34,278.05 261.34,272.33V159.67C261.34,153.95 256.71,149.32 250.99,149.32Z" />
+        <path
+            android:fillColor="@color/ic_launcher_hand"
+            android:pathData="M213.02,246.04C212.52,244.94 212.28,243.73 212.33,242.51C212.39,241.29 212.73,240.11 213.33,239.05C213.93,237.99 214.78,237.1 215.8,236.43C216.82,235.76 217.98,235.35 219.19,235.22L220.16,235.12C223.14,234.8 226.15,235.21 228.94,236.31C231.73,237.4 234.21,239.15 236.18,241.4L247.87,254.77C251.21,260.12 255.9,264.5 261.46,267.49C267.02,270.47 273.26,271.95 279.57,271.79C301.25,271.05 300.15,290.47 300.15,290.47L309.2,362.4L249.85,368.61L248.33,307.97L240.03,300.36C237.66,298.2 235.76,295.58 234.42,292.67L213.02,246.04Z" />
+        <path
+            android:fillColor="@color/ic_launcher_dot"
+            android:fillAlpha="0.4"
+            android:pathData="M248.01,220.85C250.95,220.85 253.34,218.46 253.34,215.51C253.34,212.57 250.95,210.18 248.01,210.18C245.06,210.18 242.67,212.57 242.67,215.51C242.67,218.46 245.06,220.85 248.01,220.85Z" />
+        <path
+            android:fillColor="@color/ic_launcher_dot"
+            android:fillAlpha="0.6"
+            android:pathData="M232,220.85C234.95,220.85 237.34,218.46 237.34,215.51C237.34,212.57 234.95,210.18 232,210.18C229.06,210.18 226.67,212.57 226.67,215.51C226.67,218.46 229.06,220.85 232,220.85Z" />
+        <path
+            android:fillColor="@color/ic_launcher_dot"
+            android:pathData="M216,220.85C218.95,220.85 221.33,218.46 221.33,215.51C221.33,212.57 218.95,210.18 216,210.18C213.05,210.18 210.67,212.57 210.67,215.51C210.67,218.46 213.05,220.85 216,220.85Z" />
+        <path
+            android:fillColor="@color/ic_launcher_bar"
+            android:pathData="M248.52,325.36H304.53L309.09,360.03H248.85L248.52,325.36Z" />
+    </group>
 </vector>

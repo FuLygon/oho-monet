@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- OHO+ icon, recolored with the stock Pixel light icon palette. -->
+    <color name="ic_launcher_background">@android:color/system_accent1_100</color>
+    <color name="ic_launcher_phone">@android:color/system_accent1_700</color>
+    <color name="ic_launcher_screen">@android:color/system_accent1_500</color>
+    <color name="ic_launcher_hand">@android:color/system_accent3_300</color>
+    <color name="ic_launcher_bar">@android:color/system_accent2_700</color>
+    <color name="ic_launcher_dot">@android:color/system_accent1_100</color>
+</resources>

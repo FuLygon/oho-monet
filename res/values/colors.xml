@@ -1,5 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="ic_launcher_background">#0B57D0</color>
+    <!-- Original OHO+ palette for devices without Monet (API < 31). -->
+    <color name="ic_launcher_background">#22BDC5</color>
+    <color name="ic_launcher_phone">#FAFAFA</color>
+    <color name="ic_launcher_screen">#60BAFF</color>
+    <color name="ic_launcher_hand">#FFDFD9</color>
+    <color name="ic_launcher_bar">#9BDDFC</color>
+    <color name="ic_launcher_dot">#FAFAFA</color>
     <color name="splash_background">#110D10</color>
 </resources>

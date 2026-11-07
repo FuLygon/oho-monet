@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Dark fallback for devices without Monet (API < 31). -->
+    <color name="ic_launcher_background">#004F4F</color>
+</resources>

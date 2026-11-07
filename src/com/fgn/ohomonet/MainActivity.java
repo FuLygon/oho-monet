@@ -6,6 +6,7 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.content.res.ColorStateList;
+import android.content.res.Configuration;
 import android.content.res.Resources;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
@@ -44,7 +45,6 @@ import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.RadioButton;
-import android.widget.RadioGroup;
 import android.widget.ScrollView;
 import android.widget.SeekBar;
 import android.widget.TextView;
@@ -71,6 +71,14 @@ import moe.shizuku.server.IRemoteProcess;
 import moe.shizuku.server.IShizukuService;
 import rikka.shizuku.Shizuku;
 
+/**
+ * Main screen and automation engine for OHO+ Monet.
+ *
+ * <p>The activity renders a Material 3 Expressive interface using framework views only.
+ * When the user applies a colour it drives the One Hand Operation+ settings UI through
+ * a shell process obtained from Shizuku, so neither root nor an accessibility service is
+ * required.</p>
+ */
 public class MainActivity extends Activity {
 
     // ---- OHO+ package / activities ----
@@ -81,8 +89,8 @@ public class MainActivity extends Activity {
     static final String ACT_PICK = "SGPColorPickerActivity";
 
     // ---- spectrum square calibration (fractions of the spectrum container) ----
-    // Defaults were measured on a Galaxy A55 (One UI 8). Tap "Calibrate" on any
-    // other device to replace them; the result is stored in SharedPreferences.
+    // Built-in defaults are tuned for a Galaxy A55 on One UI 8. On other devices,
+    // run "Recalibrate" once; the result is stored in SharedPreferences.
     static final double DEF_XH0 = 0.1253, DEF_XH1 = 0.8901;
     static final double DEF_YS0 = 0.0533, DEF_YS1 = 0.9378;
     static final String PREFS = "oho_calib";
@@ -124,6 +132,7 @@ public class MainActivity extends Activity {
     private Palette pal = Palette.fallback(true);
     private Palette paletteDark, paletteLight;
     private boolean themeLoaded = false;
+    private boolean themeRebuildPending = false;
     private boolean gateShowing = false;
     private boolean mainShowing = false;
     private boolean loadingShowing = false;
@@ -191,7 +200,6 @@ public class MainActivity extends Activity {
 
     static class ColorSection {
         String key, label;
-        RadioGroup modeGroup;
         RadioButton materialRadio, customRadio;
         EditText input;
         ColorPreviewView preview;
@@ -390,14 +398,19 @@ public class MainActivity extends Activity {
         left.setLayoutParams(new LinearLayout.LayoutParams(
                 0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
-        s.modeGroup = new RadioGroup(this);
-        s.modeGroup.setOrientation(RadioGroup.VERTICAL);
-        s.materialRadio = makeRadio("Material You", materialId);
-        s.customRadio = makeRadio("Custom", customId);
-        s.modeGroup.addView(s.materialRadio);
-        s.modeGroup.addView(s.customRadio);
-        left.addView(s.modeGroup, new LinearLayout.LayoutParams(
+        s.materialRadio = makeRadio("Monet", materialId);
+        left.addView(s.materialRadio, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(48)));
+
+        LinearLayout customRow = new LinearLayout(this);
+        customRow.setOrientation(LinearLayout.HORIZONTAL);
+        customRow.setGravity(Gravity.CENTER_VERTICAL);
+        customRow.setLayoutParams(new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        s.customRadio = makeRadio("Custom", customId);
+        customRow.addView(s.customRadio, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, dp(48)));
 
         s.input = new EditText(this);
         s.input.setHint("#RRGGBB");
@@ -407,17 +420,19 @@ public class MainActivity extends Activity {
                 | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
                 | InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS);
         s.input.setImeOptions(EditorInfo.IME_ACTION_DONE);
+        s.input.setGravity(Gravity.CENTER_VERTICAL);
         s.input.setPadding(dp(14), 0, dp(14), 0);
         String initial = loadCustom(key, defaultCustom);
         s.input.setText(initial);
         Integer initialColor = parseColor(initial);
         s.customColor = initialColor != null ? initialColor : 0xFF000000;
         s.inputError = initialColor == null;
+        // Just wide enough for #AARRGGBB plus padding.
         LinearLayout.LayoutParams ilp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(44));
-        ilp.leftMargin = dp(36);
-        ilp.topMargin = dp(6);
-        left.addView(s.input, ilp);
+                dp(116), dp(44));
+        ilp.leftMargin = dp(12);
+        customRow.addView(s.input, ilp);
+        left.addView(customRow);
 
         top.addView(left);
 
@@ -425,6 +440,8 @@ public class MainActivity extends Activity {
         s.preview.setPalette(pal);
         LinearLayout.LayoutParams plp = new LinearLayout.LayoutParams(dp(72), dp(72));
         plp.leftMargin = dp(16);
+        // Leave room for the 1.06x preview pop so it is not clipped on the right.
+        plp.rightMargin = dp(8);
         top.addView(s.preview, plp);
 
         card.addView(top);
@@ -432,9 +449,12 @@ public class MainActivity extends Activity {
 
         boolean matMode = loadMode(key, true);
         s.materialMode = matMode;
-        s.modeGroup.check(matMode ? materialId : customId);
+        s.materialRadio.setChecked(matMode);
+        s.customRadio.setChecked(!matMode);
         styleInput(s);
         updateSectionPreview(s);
+        s.materialRadio.setOnClickListener(v -> setSectionMode(s, true));
+        s.customRadio.setOnClickListener(v -> setSectionMode(s, false));
 
         s.input.setOnEditorActionListener((v, actionId, event) -> {
             if (actionId == EditorInfo.IME_ACTION_DONE
@@ -465,14 +485,18 @@ public class MainActivity extends Activity {
                 updateApplyEnabled();
             }
         });
-        s.modeGroup.setOnCheckedChangeListener((g, id) -> {
-            s.materialMode = id == materialId;
-            saveMode(key, s.materialMode);
-            styleInput(s);
-            updateSectionPreview(s);
-            updateApplyEnabled();
-        });
         return s;
+    }
+
+    private void setSectionMode(ColorSection s, boolean material) {
+        if (s == null) return;
+        s.materialMode = material;
+        if (s.materialRadio != null) s.materialRadio.setChecked(material);
+        if (s.customRadio != null) s.customRadio.setChecked(!material);
+        saveMode(s.key, material);
+        styleInput(s);
+        updateSectionPreview(s);
+        updateApplyEnabled();
     }
 
     private RadioButton makeRadio(String text, int id) {
@@ -504,6 +528,19 @@ public class MainActivity extends Activity {
         s.input.setBackground(outlined(fill, stroke, 14, strokeDp));
         s.input.setTextColor(enabled ? pal.onSurface : withAlpha(pal.onSurface, 0.38f));
         s.input.setHintTextColor(withAlpha(pal.onSurfaceVariant, enabled ? 0.9f : 0.38f));
+        s.input.setHighlightColor(withAlpha(pal.primary, 0.3f));
+        if (Build.VERSION.SDK_INT >= 29) {
+            s.input.setTextCursorDrawable(cursorDrawable(
+                    enabled ? pal.primary : withAlpha(pal.onSurface, 0.38f)));
+        }
+    }
+
+    private Drawable cursorDrawable(int color) {
+        GradientDrawable d = new GradientDrawable();
+        d.setShape(GradientDrawable.RECTANGLE);
+        d.setColor(color);
+        d.setSize(dp(2), dp(20));
+        return d;
     }
 
     private void commitCustom(ColorSection s) {
@@ -667,24 +704,44 @@ public class MainActivity extends Activity {
     }
 
     private void loadDarkMode() {
-        darkMode = getSharedPreferences(SETTINGS, MODE_PRIVATE)
-                .getBoolean("dark_mode", true);
-    }
-
-    private void saveDarkMode(boolean dark) {
-        getSharedPreferences(SETTINGS, MODE_PRIVATE).edit()
-                .putBoolean("dark_mode", dark).apply();
+        try {
+            int night = getResources().getConfiguration().uiMode
+                    & Configuration.UI_MODE_NIGHT_MASK;
+            // Follow the device. NIGHT_UNDEFINED (or any failure) -> dark.
+            darkMode = night != Configuration.UI_MODE_NIGHT_NO;
+        } catch (Throwable t) {
+            darkMode = true;
+        }
     }
 
     private void toggleTheme() {
         if (busy) return;
         darkMode = !darkMode;
-        saveDarkMode(darkMode);
-        log("Theme: " + (darkMode ? "dark" : "light"));
         if (mainShowing && themeLoaded) {
             pal = darkMode ? paletteDark : paletteLight;
             if (pal == null) pal = Palette.fallback(darkMode);
             buildMainUi();
+        }
+    }
+
+    @Override
+    public void onConfigurationChanged(Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        int night = newConfig.uiMode & Configuration.UI_MODE_NIGHT_MASK;
+        boolean newDark = night != Configuration.UI_MODE_NIGHT_NO;
+        if (newDark == darkMode) return;
+        darkMode = newDark;
+        pal = darkMode ? paletteDark : paletteLight;
+        if (pal == null) pal = Palette.fallback(darkMode);
+        applyPaletteToWindow();
+        if (busy) {
+            themeRebuildPending = true;
+            return;
+        }
+        if (mainShowing && themeLoaded) {
+            buildMainUi();
+        } else if (gateShowing) {
+            showGate();
         }
     }
 
@@ -728,7 +785,13 @@ public class MainActivity extends Activity {
             }
             if (speedBar != null) speedBar.setEnabled(!b);
             if (themeToggleView != null) themeToggleView.setEnabled(!b);
-            if (!b) updateApplyEnabled();
+            if (!b) {
+                updateApplyEnabled();
+                if (themeRebuildPending) {
+                    themeRebuildPending = false;
+                    if (mainShowing && themeLoaded) buildMainUi();
+                }
+            }
         });
     }
 
@@ -809,8 +872,6 @@ public class MainActivity extends Activity {
         materialArrowOk = true;
         materialRetry = 0;
         themeLoaded = true;
-        log("Theme loaded: fill=" + colorToHex(materialFill)
-                + " arrow=" + colorToHex(materialArrow));
     }
 
     private int sysColor(int resId, int fallback) {
@@ -884,7 +945,6 @@ public class MainActivity extends Activity {
             log("Shizuku listener error: " + t);
         }
 
-        log("Ready. Shizuku running: " + safePing());
         loadCalibration();
         pendingIntent = getIntent();
         onShizukuStateChanged();
@@ -1114,8 +1174,9 @@ public class MainActivity extends Activity {
         logScroll.addView(logView, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         logs.addView(logScroll, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(160)));
-        content.addView(logs);
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(160), 1f));
+        content.addView(logs, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
         setContentView(scroll);
         scroll.post(() -> logScroll.fullScroll(View.FOCUS_DOWN));
@@ -1302,22 +1363,22 @@ public class MainActivity extends Activity {
         boolean targetArrow = false;
         boolean colorTarget = false;
         if (fillExtra != null) {
-            fillSection.modeGroup.check(fillSection.customId);
+            setSectionMode(fillSection, false);
             fillSection.input.setText(fillExtra);
             commitCustom(fillSection);
             colorTarget = true;
         } else if (fillMat) {
-            fillSection.modeGroup.check(fillSection.materialId);
+            setSectionMode(fillSection, true);
             colorTarget = true;
         }
         if (arrowExtra != null) {
-            arrowSection.modeGroup.check(arrowSection.customId);
+            setSectionMode(arrowSection, false);
             arrowSection.input.setText(arrowExtra);
             commitCustom(arrowSection);
             targetArrow = true;
             colorTarget = true;
         } else if (arrowMat) {
-            arrowSection.modeGroup.check(arrowSection.materialId);
+            setSectionMode(arrowSection, true);
             targetArrow = true;
             colorTarget = true;
         }
@@ -1325,12 +1386,12 @@ public class MainActivity extends Activity {
         // Backward-compatible single-colour intent: --es hex --es target fill|arrow
         if (hx != null && !hx.isEmpty()) {
             if ("arrow".equalsIgnoreCase(tg)) {
-                arrowSection.modeGroup.check(arrowSection.customId);
+                setSectionMode(arrowSection, false);
                 arrowSection.input.setText(hx);
                 commitCustom(arrowSection);
                 targetArrow = true;
             } else {
-                fillSection.modeGroup.check(fillSection.customId);
+                setSectionMode(fillSection, false);
                 fillSection.input.setText(hx);
                 commitCustom(fillSection);
             }
@@ -1363,7 +1424,7 @@ public class MainActivity extends Activity {
     private Integer resolveColor(ColorSection s, String label) {
         if (s.materialMode) {
             if (!s.materialOk) {
-                String msg = "Material You " + label + " color unavailable \u2014 check Shizuku/permission";
+                String msg = "Monet " + label + " color unavailable \u2014 check Shizuku/permission";
                 log(msg);
                 toast(msg);
                 return null;
@@ -1384,12 +1445,12 @@ public class MainActivity extends Activity {
     private void startApply() {
         if (busy) return;
 
-        // Material You is fetched in the background at startup; wait briefly for it.
+        // Wait briefly if the Material You palette is not ready yet.
         if ((fillSection.materialMode && !fillSection.materialOk)
                 || (arrowSection.materialMode && !arrowSection.materialOk)) {
             if (materialRetry < 5) {
                 materialRetry++;
-                log("Waiting for Material You colors\u2026");
+                log("Waiting for Monet colors\u2026");
                 ui.postDelayed(this::startApply, 800);
                 return;
             }
@@ -1529,8 +1590,8 @@ public class MainActivity extends Activity {
     }
 
     /**
-     * Pause scaled by the running flow's preset. Fast is the old Normal
-     * timing; Normal and Slow step up gradually from it (150 ms floor).
+     * Pause scaled by the running flow's preset. Fast uses the base timing;
+     * Normal and Slow scale the pauses up gradually (150 ms floor).
      */
     private void pause(long normalMs) {
         long ms = normalMs;
@@ -1880,10 +1941,10 @@ public class MainActivity extends Activity {
 
         prepareOverlay();
 
-        // wake the screen if it is off (harmless if already on)
+        // Wake the screen if it is off (harmless if already on).
         try { sh("input keyevent KEYCODE_WAKEUP"); } catch (Exception ignored) {}
 
-        // warn if locked
+        // Warn if the screen is locked.
         String lock = sh("dumpsys window | grep mDreamingLockscreen");
         if (lock.contains("true")) log("WARNING: screen appears locked");
 
@@ -1998,7 +2059,7 @@ public class MainActivity extends Activity {
 
             status("Picking " + name + " color\u2026");
 
-            // iterate on hue / saturation using the brightness bar readback
+            // Iterate on hue/saturation using the brightness-bar readback.
             for (int it = 0; it < 4; it++) {
                 x = clamp(x, cont.l + 2, cont.r - 2);
                 y = clamp(y, cont.t + 2, cont.b - 2);
@@ -2021,7 +2082,7 @@ public class MainActivity extends Activity {
                 y += dS * (yS1 - yS0);
             }
 
-            // brightness (drag, must be after the square tap)
+            // Brightness (drag, must be after the square tap).
             int cy = sb.cy();
             int targetX = sb.l + Math.round((sb.r - sb.l) * (vpct / 100f));
             log("7) brightness " + vpct + "% -> x=" + targetX);
@@ -2029,7 +2090,7 @@ public class MainActivity extends Activity {
             swipe(sb.r - 6, cy, targetX, cy, swipeMs(400));
             pause(250);
 
-            // alpha (opacity bar sits below the brightness bar). The picker
+            // Alpha (the opacity bar sits below the brightness bar). The picker
             // remembers the last opacity, so 100% must be set explicitly too.
             if (alphaPct >= 100) {
                 resetOpacity(op);
@@ -2047,7 +2108,7 @@ public class MainActivity extends Activity {
             expect("SGPAnimationStyleActivity");
             pause(450);
 
-            // verify swatch. Arrow 3 keeps its preview stale until the
+            // Verify the swatch. Arrow 3 keeps its preview stale until the
             // Animation screen is re-entered, so refresh it first.
             if ("Arrow 3".equals(style)) {
                 swatchRow = refreshAnimationScreen(fill);
@@ -2066,7 +2127,7 @@ public class MainActivity extends Activity {
             log("  " + name + " mismatch (max diff " + diff + "), retrying");
             status("Almost there \u2014 adjusting " + name + "\u2026");
 
-            // correct using achieved vs target hue/saturation (only meaningful
+            // Correct using achieved vs target hue/saturation (only meaningful
             // when the swatch shows the full colour, not an alpha composite)
             if (alphaPct >= 100) {
                 float[] gotHsv = rgbToHsv(got[0], got[1], got[2]);
@@ -2078,7 +2139,7 @@ public class MainActivity extends Activity {
                 corrY += dS * (yS1 - yS0);
             }
 
-            // reopen the picker for the next attempt
+            // Reopen the picker for the next attempt.
             ui = dumpUiTop("SGPAnimationStyleActivity");
             Nd row2 = byId(ui, fill ? "fill_color" : "arrow_color");
             if (row2 == null) throw new Exception(name + " colour row gone, cannot retry");
@@ -2143,7 +2204,7 @@ public class MainActivity extends Activity {
                     "Calibration loaded: H[%.4f..%.4f] S[%.4f..%.4f] (%s)",
                     calXH0, calXH1, calYS0, calYS1, sp.getString("model", "?")));
         } else {
-            log("No calibration yet - using built-in defaults (tap Calibrate).");
+            log("No calibration yet - using built-in defaults (tap Recalibrate).");
         }
     }
 
@@ -2378,12 +2439,12 @@ public class MainActivity extends Activity {
     }
 
     private int[] sampleSwatch(Bitmap bmp, Nd row) {
-        // the swatch circle sits ~59% of the row height in from the left edge
+        // The swatch circle sits ~59% of the row height in from the left edge.
         int x = row.l + Math.max(24, (int) (row.h() * 0.59));
         int y = row.cy();
         int c = bmp.getPixel(x, y);
         int[] px = {Color.red(c), Color.green(c), Color.blue(c)};
-        // if we hit the dark background, scan the row for the most saturated pixel
+        // If the sample lands on the dark background, scan the row for the most saturated pixel.
         if (px[0] < 60 && px[1] < 60 && px[2] < 60) {
             int bestScore = -1;
             int[] best = px;
@@ -2435,7 +2496,7 @@ public class MainActivity extends Activity {
     }
 
     private int[] sampleRowBackground(Bitmap bmp, Nd row) {
-        // the top edge of the row is the card background (the title/swatch sit lower)
+        // The top edge of the row is the card background (the title/swatch sit lower).
         int x = row.l + row.w() / 2;
         int y = row.t + Math.max(4, row.h() / 12);
         int c = bmp.getPixel(x, y);
