@@ -15,8 +15,6 @@ This app was made to set Monet colors (or a custom color) for One Hand Operation
 <a href="https://github.com/FuLygon/oho-monet/releases"><img src="https://raw.githubusercontent.com/Kunzisoft/Github-badge/main/get-it-on-github.png" alt="Get it on GitHub" height="80"></a>
 <a href="https://apps.obtainium.imranr.dev/redirect.html?r=obtainium%3A%2F%2Fadd%2Fhttps%3A%2F%2Fgithub.com%2FFuLygon%2Foho-monet"><img src="https://raw.githubusercontent.com/ImranR98/Obtainium/main/assets/graphics/badge_obtainium.png" alt="Get it on Obtainium" height="80"></a>
 
-Download the latest APK from GitHub, or add the repository to Obtainium to get updates automatically.
-
 ## How it works
 
 One Hand Operation+ doesn't let you type a color code, so the app sets the colors by emulating screen taps in the OHO+ settings.
