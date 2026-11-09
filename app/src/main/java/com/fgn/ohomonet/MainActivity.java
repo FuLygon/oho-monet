@@ -1,6 +1,7 @@
 package com.fgn.ohomonet;
 
 import android.app.Activity;
+import android.app.Dialog;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
@@ -35,6 +36,7 @@ import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.Window;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
 import android.view.WindowManager;
@@ -90,11 +92,13 @@ public class MainActivity extends Activity {
 
     // ---- spectrum square calibration (fractions of the spectrum container) ----
     // Built-in defaults are tuned for a Galaxy A55 on One UI 8. On other devices,
-    // run "Recalibrate" once; the result is stored in SharedPreferences.
+    // run calibration once; the result is stored in SharedPreferences.
     static final double DEF_XH0 = 0.1253, DEF_XH1 = 0.8901;
     static final double DEF_YS0 = 0.0533, DEF_YS1 = 0.9378;
     static final String PREFS = "oho_calib";
     static final String SETTINGS = "oho_settings";
+    // Set when the one-time calibration tip has been shown, so it never repeats.
+    static final String KEY_CALIB_INTRO_SHOWN = "calib_intro_shown";
 
     // ---- speed presets ----
     static final int SPEED_SLOW = 0, SPEED_NORMAL = 1, SPEED_FAST = 2;
@@ -106,6 +110,7 @@ public class MainActivity extends Activity {
     private TextView logView;
     private TextView applyBtn;
     private TextView calibBtn;
+    private Dialog calibIntroDialog;
     private Toast currentToast;
     private TextView overlayView;
     private WindowManager overlayWm;
@@ -969,6 +974,10 @@ public class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         hideOverlay();
+        if (calibIntroDialog != null) {
+            calibIntroDialog.dismiss();
+            calibIntroDialog = null;
+        }
         super.onDestroy();
     }
 
@@ -1150,7 +1159,7 @@ public class MainActivity extends Activity {
         applyBtn = pillButton("Apply", true, pal, this::startApply);
         content.addView(applyBtn);
         addSpace(content, 12);
-        calibBtn = pillButton("Recalibrate", false, pal, this::startCalibration);
+        calibBtn = pillButton(calibrationButtonLabel(), false, pal, this::startCalibration);
         content.addView(calibBtn);
         addSpace(content, 24);
 
@@ -1191,6 +1200,9 @@ public class MainActivity extends Activity {
             pendingIntent = null;
             applyIntent(it);
         }
+
+        // One-time calibration tip, shown after the entrance animation.
+        scroll.postDelayed(this::maybeShowCalibrationIntro, 350);
     }
 
     private void showGate() {
@@ -2192,6 +2204,82 @@ public class MainActivity extends Activity {
     // =====================================================================
     // Calibration
     // =====================================================================
+
+    /** "Recommended" until this device has calibration data, then "Recalibrate". */
+    private String calibrationButtonLabel() {
+        return calibrated ? "Recalibrate" : "Calibrate (Recommended)";
+    }
+
+    private void updateCalibrationButton() {
+        if (calibBtn != null) calibBtn.setText(calibrationButtonLabel());
+    }
+
+    /**
+     * One-time tip about calibration. The "shown" flag is written before the
+     * dialog opens, so it appears exactly once per install even if the user
+     * dismisses it, presses Back, or never runs calibration at all.
+     */
+    private void maybeShowCalibrationIntro() {
+        if (isFinishing() || !mainShowing) return;
+        SharedPreferences sp = getSharedPreferences(SETTINGS, MODE_PRIVATE);
+        if (sp.getBoolean(KEY_CALIB_INTRO_SHOWN, false)) return;
+        sp.edit().putBoolean(KEY_CALIB_INTRO_SHOWN, true).apply();
+
+        Dialog dialog = new Dialog(this);
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
+        dialog.setCanceledOnTouchOutside(true);
+        dialog.setOnDismissListener(d -> calibIntroDialog = null);
+        calibIntroDialog = dialog;
+
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setPadding(dp(24), dp(24), dp(24), dp(20));
+        card.setBackground(rounded(pal.surfaceContainerHigh, 28));
+
+        TextView title = label("Calibration is recommended", 24, pal.onSurface, true);
+        card.addView(title);
+        addSpace(card, 12);
+
+        TextView body = label(
+                "Calibration measures the colour picker layout of One Hand Operation+ "
+                        + "on this device, so OHO+ Monet can apply your colours more accurately.\n\n"
+                        + "Calibration takes about a minute. Don't interact with the phone "
+                        + "during calibration.",
+                14, pal.onSurfaceVariant, false);
+        body.setLineSpacing(dp(4), 1f);
+        card.addView(body);
+        addSpace(card, 24);
+
+        card.addView(pillButton("Don't show again", true, pal, dialog::dismiss));
+
+        // Wrap the card so it keeps a gap from the bottom edge of the screen.
+        FrameLayout sheet = new FrameLayout(this);
+        sheet.setPadding(0, 0, 0, dp(32));
+        sheet.addView(card, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        dialog.setContentView(sheet);
+        try {
+            dialog.show();
+        } catch (Throwable t) {
+            log("Calibration tip could not be shown: " + t);
+            calibIntroDialog = null;
+            return;
+        }
+
+        Window window = dialog.getWindow();
+        if (window != null) {
+            window.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+            int width = (int) (getResources().getDisplayMetrics().widthPixels * 0.9f);
+            window.setLayout(width, ViewGroup.LayoutParams.WRAP_CONTENT);
+            WindowManager.LayoutParams lp = window.getAttributes();
+            lp.gravity = Gravity.BOTTOM;
+            lp.dimAmount = 0.5f;
+            window.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
+            window.setAttributes(lp);
+        }
+    }
+
     private void loadCalibration() {
         SharedPreferences sp = getSharedPreferences(PREFS, MODE_PRIVATE);
         calibrated = sp.getBoolean("valid", false);
@@ -2204,7 +2292,7 @@ public class MainActivity extends Activity {
                     "Calibration loaded: H[%.4f..%.4f] S[%.4f..%.4f] (%s)",
                     calXH0, calXH1, calYS0, calYS1, sp.getString("model", "?")));
         } else {
-            log("No calibration yet - using built-in defaults (tap Recalibrate).");
+            log("No calibration yet - using built-in defaults (tap the calibration button).");
         }
     }
 
@@ -2224,6 +2312,7 @@ public class MainActivity extends Activity {
         calYS0 = sy0;
         calYS1 = sy1;
         calibrated = true;
+        ui.post(this::updateCalibrationButton);
     }
 
     // =====================================================================
