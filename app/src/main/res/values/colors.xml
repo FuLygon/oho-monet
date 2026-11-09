@@ -6,6 +6,6 @@
     <color name="ic_launcher_screen">#60BAFF</color>
     <color name="ic_launcher_hand">#FFDFD9</color>
     <color name="ic_launcher_bar">#9BDDFC</color>
-    <color name="ic_launcher_dot">#FAFAFA</color>
+    <color name="ic_launcher_palette">#FAFAFA</color>
     <color name="splash_background">#110D10</color>
 </resources>

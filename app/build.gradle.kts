@@ -17,6 +17,15 @@ android {
     }
 
     signingConfigs {
+        // Sign debug builds with the checked-in key so they can update the
+        // prebuilt APK and keep the README install steps reproducible.
+        getByName("debug") {
+            storeFile = rootProject.file("debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
+
         releaseKeystorePath?.let { path ->
             create("release") {
                 storeFile = file(path)
