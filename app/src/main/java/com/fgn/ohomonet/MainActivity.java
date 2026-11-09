@@ -329,12 +329,17 @@ public class MainActivity extends Activity {
         }
     }
 
-    /** Lock glyph used by the Shizuku gate. */
-    static class LockIconView extends View {
+    /** Circular Shizuku badge used by the Shizuku gate. */
+    static class ShizukuIconView extends View {
         int bg, fg;
         final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        final Path circle = new Path();
+        final Drawable glyph;
 
-        LockIconView(Context c) { super(c); }
+        ShizukuIconView(Context c) {
+            super(c);
+            glyph = c.getDrawable(R.drawable.ic_shizuku);
+        }
 
         void setPalette(Palette p) {
             bg = p.primaryContainer;
@@ -348,22 +353,16 @@ public class MainActivity extends Activity {
             paint.setStyle(Paint.Style.FILL);
             paint.setColor(bg);
             canvas.drawCircle(cx, cy, r, paint);
-            float s = r * 0.52f;
-            paint.setColor(fg);
-            paint.setStyle(Paint.Style.STROKE);
-            paint.setStrokeWidth(r * 0.13f);
-            paint.setStrokeCap(Paint.Cap.ROUND);
-            RectF shackle = new RectF(cx - s * 0.72f, cy - s * 0.95f,
-                    cx + s * 0.72f, cy + s * 0.25f);
-            canvas.drawArc(shackle, 180, 180, false, paint);
-            paint.setStyle(Paint.Style.FILL);
-            RectF body = new RectF(cx - s, cy - s * 0.1f, cx + s, cy + s * 0.85f);
-            canvas.drawRoundRect(body, s * 0.28f, s * 0.28f, paint);
-            paint.setColor(bg);
-            canvas.drawCircle(cx, cy + s * 0.28f, s * 0.18f, paint);
-            RectF key = new RectF(cx - s * 0.09f, cy + s * 0.32f,
-                    cx + s * 0.09f, cy + s * 0.62f);
-            canvas.drawRoundRect(key, s * 0.08f, s * 0.08f, paint);
+
+            if (glyph == null) return;
+            circle.reset();
+            circle.addCircle(cx, cy, r, Path.Direction.CW);
+            canvas.save();
+            canvas.clipPath(circle);
+            glyph.setTint(fg);
+            glyph.setBounds(0, 0, (int) w, (int) h);
+            glyph.draw(canvas);
+            canvas.restore();
         }
     }
 
@@ -1224,7 +1223,7 @@ public class MainActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER));
 
-        LockIconView icon = new LockIconView(this);
+        ShizukuIconView icon = new ShizukuIconView(this);
         icon.setPalette(pal);
         LinearLayout.LayoutParams ilp = new LinearLayout.LayoutParams(dp(72), dp(72));
         ilp.gravity = Gravity.CENTER_HORIZONTAL;
@@ -1237,8 +1236,8 @@ public class MainActivity extends Activity {
         addSpace(card, 12);
 
         TextView body = label(
-                "OHO+ Monet uses Shizuku to change One Hand Operation+ settings. "
-                        + "Shizuku must be installed, running, and allowed to control this app.",
+                "OHO+ Monet needs Shizuku to control your device and change "
+                        + "One Hand Operation+ settings.",
                 15, pal.onSurfaceVariant, false);
         body.setGravity(Gravity.CENTER_HORIZONTAL);
         body.setLineSpacing(dp(3), 1f);
@@ -1259,7 +1258,7 @@ public class MainActivity extends Activity {
         dlp.rightMargin = dp(8);
         statusRow.addView(dot, dlp);
         String statusText = !installed ? "Shizuku is not installed"
-                : !running ? "Shizuku is not running" : "Permission not granted";
+                : !running ? "Shizuku is not running" : "Unauthorized";
         statusRow.addView(label(statusText, 13, pal.onSurfaceVariant, false));
         LinearLayout.LayoutParams srp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
@@ -1268,7 +1267,7 @@ public class MainActivity extends Activity {
         addSpace(card, 24);
 
         String actionText = !installed ? "Install Shizuku"
-                : !running ? "Open Shizuku" : "Grant permission";
+                : !running ? "Open Shizuku" : "Authorize";
         card.addView(pillButton(actionText, true, pal,
                 () -> onGateAction(installed, running, granted)));
         addSpace(card, 12);
@@ -1279,7 +1278,8 @@ public class MainActivity extends Activity {
                 ? "Install Shizuku from the Play Store, start it, then return here."
                 : !running
                 ? "Open Shizuku and start the service, then return here."
-                : "Tap Grant permission and allow access.";
+                : "This app has no internet permission. Everything is stored locally "
+                + "on your device.";
         TextView hint = label(hintText, 12, pal.onSurfaceVariant, false);
         hint.setGravity(Gravity.CENTER_HORIZONTAL);
         card.addView(hint);
