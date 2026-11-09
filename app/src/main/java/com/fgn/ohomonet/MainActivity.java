@@ -334,6 +334,43 @@ public class MainActivity extends Activity {
         }
     }
 
+    /** Circular GitHub link button, sitting at the far right of the header. */
+    static class GitHubIconView extends View {
+        int iconColor = 0xFF49454F, bgColor = 0xFFE6E0E9;
+        final Drawable glyph;
+
+        GitHubIconView(Context c) {
+            super(c);
+            glyph = c.getDrawable(R.drawable.ic_github);
+            setClickable(true);
+            setFocusable(true);
+        }
+
+        void setPalette(Palette p) {
+            iconColor = p.onSurfaceVariant;
+            bgColor = p.surfaceContainerHigh;
+            GradientDrawable content = new GradientDrawable();
+            content.setShape(GradientDrawable.OVAL);
+            content.setColor(bgColor);
+            setBackground(new RippleDrawable(
+                    ColorStateList.valueOf(withAlpha(p.onSurfaceVariant, 0.16f)), content, null));
+            setContentDescription("Open the GitHub repository");
+            invalidate();
+        }
+
+        @Override protected void onDraw(Canvas canvas) {
+            if (glyph == null) return;
+            float w = getWidth(), h = getHeight();
+            // The mark fills half of the 48dp badge, matching the moon/sun glyph.
+            float size = Math.min(w, h) * 0.5f;
+            int left = Math.round((w - size) / 2f);
+            int top = Math.round((h - size) / 2f);
+            glyph.setTint(iconColor);
+            glyph.setBounds(left, top, left + Math.round(size), top + Math.round(size));
+            glyph.draw(canvas);
+        }
+    }
+
     /** Circular Shizuku badge used by the Shizuku gate. */
     static class ShizukuIconView extends View {
         int bg, fg;
@@ -728,6 +765,17 @@ public class MainActivity extends Activity {
         }
     }
 
+    /** Open the project page in the user's browser, never in an in-app WebView. */
+    private void openGitHub() {
+        try {
+            Intent i = new Intent(Intent.ACTION_VIEW,
+                    Uri.parse("https://github.com/FuLygon/oho-monet"));
+            startActivity(i);
+        } catch (Throwable t) {
+            toast("No browser found");
+        }
+    }
+
     @Override
     public void onConfigurationChanged(Configuration newConfig) {
         super.onConfigurationChanged(newConfig);
@@ -1099,6 +1147,12 @@ public class MainActivity extends Activity {
         themeToggleView.setPalette(pal, darkMode);
         themeToggleView.setOnClickListener(v -> toggleTheme());
         header.addView(themeToggleView, new LinearLayout.LayoutParams(dp(48), dp(48)));
+        GitHubIconView githubView = new GitHubIconView(this);
+        githubView.setPalette(pal);
+        githubView.setOnClickListener(v -> openGitHub());
+        LinearLayout.LayoutParams glp = new LinearLayout.LayoutParams(dp(48), dp(48));
+        glp.leftMargin = dp(8);
+        header.addView(githubView, glp);
         content.addView(header);
         addSpace(content, 20);
 
