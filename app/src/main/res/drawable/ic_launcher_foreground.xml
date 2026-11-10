@@ -18,12 +18,11 @@
         <path
             android:fillColor="@color/ic_launcher_screen"
             android:pathData="M250.99,149.32H181.01C175.29,149.32 170.66,153.95 170.66,159.67V272.33C170.66,278.05 175.29,282.68 181.01,282.68H250.99C256.71,282.68 261.34,278.05 261.34,272.33V159.67C261.34,153.95 256.71,149.32 250.99,149.32Z" />
-        <!-- Palette glyph, vectorised from the supplied paint-palette artwork.
-             A single even-odd path keeps the colour dynamic (Monet) instead of
-             baking a bitmap. 0.10925 x 512 = 55.9 vector units, i.e. 87.4 px in
-             the 450 px icon; the translate keeps it centred at (216,216) in this
-             432 viewport. Drawn before the hand so the fingertip stays in front
-             and touches it. -->
+        <!-- Palette glyph, traced from the paint-palette artwork. A single even-odd
+             path keeps the color dynamic (Monet) instead of baking a bitmap.
+             0.10925 x 512 = 55.9 vector units, i.e. 87.4 px in the 450 px icon;
+             the translate keeps it centered at (216,216) in this 432 viewport.
+             Drawn before the hand so the fingertip stays in front and touches it. -->
         <group
             android:translateX="188.03"
             android:translateY="188.03"

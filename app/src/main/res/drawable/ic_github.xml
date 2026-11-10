@@ -2,7 +2,7 @@
 <!--
     GitHub "Octocat" mark from the official GitHub logo (github/markup, CC0 /
     trademark policy allows use for links to GitHub). The 24x24 viewport keeps
-    the original proportions; the colour is supplied at runtime with
+    the original proportions; the color is supplied at runtime with
     Drawable.setTint() so the badge follows Monet.
 -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"

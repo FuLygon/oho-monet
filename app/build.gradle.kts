@@ -17,8 +17,8 @@ android {
     }
 
     signingConfigs {
-        // Sign debug builds with the checked-in key so they can update the
-        // prebuilt APK and keep the README install steps reproducible.
+        // Use the shared debug keystore so local debug builds keep a stable
+        // signature and can update an already installed build.
         getByName("debug") {
             storeFile = rootProject.file("debug.keystore")
             storePassword = "android"

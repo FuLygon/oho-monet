@@ -1,10 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
     Shizuku glyph, derived from the icon in the Shizuku project
-    (RikkaApps/Shizuku): the hexagon stays centred while the cat sits in the
+    (RikkaApps/Shizuku): the hexagon stays centered while the cat sits in the
     lower-left, exactly like the original artwork. The group scales it up so the
     cat reaches the edge of the circular badge, which clips it. The two eye
-    circles are punched out with the even-odd fill rule, and the colour is
+    circles are punched out with the even-odd fill rule, and the color is
     supplied at runtime with Drawable.setTint() so the badge follows Monet.
 -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"

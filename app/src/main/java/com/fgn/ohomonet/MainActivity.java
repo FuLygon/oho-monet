@@ -77,9 +77,19 @@ import rikka.shizuku.Shizuku;
  * Main screen and automation engine for OHO+ Monet.
  *
  * <p>The activity renders a Material 3 Expressive interface using framework views only.
- * When the user applies a colour it drives the One Hand Operation+ settings UI through
+ * When the user applies a color it drives the One Hand Operation+ settings UI through
  * a shell process obtained from Shizuku, so neither root nor an accessibility service is
  * required.</p>
+ *
+ * <p>Automation can also be started from adb or another app with these intent extras:</p>
+ * <ul>
+ *   <li>{@code auto} (boolean) - run the apply flow once the UI is ready</li>
+ *   <li>{@code calibrate} (boolean) - run calibration instead</li>
+ *   <li>{@code speed} (int) - 0 = Slow, 1 = Normal, 2 = Fast</li>
+ *   <li>{@code fillMaterial} / {@code arrowMaterial} (boolean) - use the Monet preset</li>
+ *   <li>{@code fill} / {@code arrow} (String) - custom #RRGGBB or #AARRGGBB color</li>
+ *   <li>{@code hex} (String) with {@code target} "fill" or "arrow" - legacy single color</li>
+ * </ul>
  */
 public class MainActivity extends Activity {
 
@@ -91,13 +101,13 @@ public class MainActivity extends Activity {
     static final String ACT_PICK = "SGPColorPickerActivity";
 
     // ---- spectrum square calibration (fractions of the spectrum container) ----
-    // Built-in defaults are tuned for a Galaxy A55 on One UI 8. On other devices,
-    // run calibration once; the result is stored in SharedPreferences.
+    // Defaults target One UI 8 on a Galaxy A55. On other devices or layouts, run
+    // calibration once; the result is stored in SharedPreferences.
     static final double DEF_XH0 = 0.1253, DEF_XH1 = 0.8901;
     static final double DEF_YS0 = 0.0533, DEF_YS1 = 0.9378;
     static final String PREFS = "oho_calib";
     static final String SETTINGS = "oho_settings";
-    // Set when the one-time calibration tip has been shown, so it never repeats.
+    // Tracks the one-time calibration tip so it is never shown twice.
     static final String KEY_CALIB_INTRO_SHOWN = "calib_intro_shown";
 
     // ---- speed presets ----
@@ -125,7 +135,7 @@ public class MainActivity extends Activity {
     private volatile int flowSpeed = SPEED_NORMAL;  // snapshot used by the running flow
     private volatile boolean speedHint = false;
 
-    // ---- per-colour sections (Material You vs Custom) ----
+    // ---- fill/arrow color sections (Monet preset vs custom) ----
     private ColorSection fillSection, arrowSection;
     private volatile boolean materialFillOk = false, materialArrowOk = false;
     private volatile int materialFill = 0, materialArrow = 0;
@@ -153,6 +163,8 @@ public class MainActivity extends Activity {
         final boolean dark;
         int primary, onPrimary, primaryContainer, onPrimaryContainer;
         int secondaryContainer, onSecondaryContainer;
+        // Accent2 fixed roles (theme independent), used by the light-mode Monet preset.
+        int secondaryFixedDim, onSecondaryFixed;
         int surface, onSurface, surfaceContainer, surfaceContainerHigh, surfaceContainerHighest;
         int surfaceVariant, onSurfaceVariant;
         int outline, outlineVariant;
@@ -169,6 +181,8 @@ public class MainActivity extends Activity {
                 p.onPrimaryContainer = 0xFFD3E3FD;
                 p.secondaryContainer = 0xFF3B4866;
                 p.onSecondaryContainer = 0xFFD7E3FF;
+                p.secondaryFixedDim = 0xFFD3E3FD;
+                p.onSecondaryFixed = 0xFF001B3F;
                 p.surface = 0xFF111318;
                 p.onSurface = 0xFFE2E2E9;
                 p.surfaceContainer = 0xFF1D2024;
@@ -187,6 +201,8 @@ public class MainActivity extends Activity {
                 p.onPrimaryContainer = 0xFF041E49;
                 p.secondaryContainer = 0xFFD7E3FF;
                 p.onSecondaryContainer = 0xFF001B3F;
+                p.secondaryFixedDim = 0xFFD3E3FD;
+                p.onSecondaryFixed = 0xFF001B3F;
                 p.surface = 0xFFF8F9FF;
                 p.onSurface = 0xFF1A1C1E;
                 p.surfaceContainer = 0xFFEEF0F6;
@@ -235,7 +251,7 @@ public class MainActivity extends Activity {
                 | (Math.round(ag + (bg - ag) * t) << 8) | Math.round(ab + (bb - ab) * t);
     }
 
-    /** Circular colour preview with a checkerboard behind it for alpha. */
+    /** Circular color preview with a checkerboard behind it for alpha. */
     static class ColorPreviewView extends View {
         int color = 0xFF000000;
         int outlineColor = 0xFF777777;
@@ -283,7 +299,7 @@ public class MainActivity extends Activity {
     /** Circular dark/light toggle. Moon in dark mode, sun in light mode. */
     static class ThemeToggleView extends View {
         boolean dark = true;
-        int iconColor = 0xFFFFFFFF, bgColor = 0xFF6750A4;
+        int iconColor = 0xFFC4C6D0, bgColor = 0xFF282A2F;
         final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
 
         ThemeToggleView(Context c) {
@@ -294,13 +310,14 @@ public class MainActivity extends Activity {
 
         void setPalette(Palette p, boolean dark) {
             this.dark = dark;
-            iconColor = p.onPrimary;
-            bgColor = p.primary;
+            // Same muted treatment as the GitHub badge so the header icons match.
+            iconColor = p.onSurfaceVariant;
+            bgColor = p.surfaceContainerHigh;
             GradientDrawable content = new GradientDrawable();
             content.setShape(GradientDrawable.OVAL);
             content.setColor(bgColor);
             setBackground(new RippleDrawable(
-                    ColorStateList.valueOf(withAlpha(p.onPrimary, 0.18f)), content, null));
+                    ColorStateList.valueOf(withAlpha(p.onSurfaceVariant, 0.16f)), content, null));
             setContentDescription(dark ? "Switch to light mode" : "Switch to dark mode");
             invalidate();
         }
@@ -311,23 +328,24 @@ public class MainActivity extends Activity {
             paint.setColor(iconColor);
             paint.setStyle(Paint.Style.FILL);
             if (dark) {
+                // Crescent sized so its outer circle matches the GitHub glyph (r).
                 Path moon = new Path();
-                moon.addCircle(cx, cy, r * 0.42f, Path.Direction.CW);
+                moon.addCircle(cx, cy, r * 0.50f, Path.Direction.CW);
                 Path cut = new Path();
-                cut.addCircle(cx + r * 0.22f, cy - r * 0.16f, r * 0.40f, Path.Direction.CW);
+                cut.addCircle(cx + r * 0.262f, cy - r * 0.190f, r * 0.476f, Path.Direction.CW);
                 moon.op(cut, Path.Op.DIFFERENCE);
                 canvas.drawPath(moon, paint);
             } else {
-                canvas.drawCircle(cx, cy, r * 0.28f, paint);
+                canvas.drawCircle(cx, cy, r * 0.23f, paint);
                 paint.setStyle(Paint.Style.STROKE);
-                paint.setStrokeWidth(r * 0.09f);
+                paint.setStrokeWidth(r * 0.073f);
                 paint.setStrokeCap(Paint.Cap.ROUND);
                 for (int i = 0; i < 8; i++) {
                     double a = Math.toRadians(i * 45);
-                    float x1 = cx + (float) (Math.cos(a) * r * 0.45f);
-                    float y1 = cy + (float) (Math.sin(a) * r * 0.45f);
-                    float x2 = cx + (float) (Math.cos(a) * r * 0.62f);
-                    float y2 = cy + (float) (Math.sin(a) * r * 0.62f);
+                    float x1 = cx + (float) (Math.cos(a) * r * 0.33f);
+                    float y1 = cy + (float) (Math.sin(a) * r * 0.33f);
+                    float x2 = cx + (float) (Math.cos(a) * r * 0.4635f);
+                    float y2 = cy + (float) (Math.sin(a) * r * 0.4635f);
                     canvas.drawLine(x1, y1, x2, y2, paint);
                 }
             }
@@ -468,7 +486,7 @@ public class MainActivity extends Activity {
         Integer initialColor = parseColor(initial);
         s.customColor = initialColor != null ? initialColor : 0xFF000000;
         s.inputError = initialColor == null;
-        // Just wide enough for #AARRGGBB plus padding.
+        // Wide enough for #AARRGGBB plus horizontal padding.
         LinearLayout.LayoutParams ilp = new LinearLayout.LayoutParams(
                 dp(116), dp(44));
         ilp.leftMargin = dp(12);
@@ -758,6 +776,7 @@ public class MainActivity extends Activity {
     private void toggleTheme() {
         if (busy) return;
         darkMode = !darkMode;
+        refreshMaterialColors();
         if (mainShowing && themeLoaded) {
             pal = darkMode ? paletteDark : paletteLight;
             if (pal == null) pal = Palette.fallback(darkMode);
@@ -785,6 +804,7 @@ public class MainActivity extends Activity {
         darkMode = newDark;
         pal = darkMode ? paletteDark : paletteLight;
         if (pal == null) pal = Palette.fallback(darkMode);
+        refreshMaterialColors();
         applyPaletteToWindow();
         if (busy) {
             themeRebuildPending = true;
@@ -866,9 +886,9 @@ public class MainActivity extends Activity {
     }
 
     /**
-     * Reads the Material You role colours from the framework itself. These are the
+     * Reads the Material You role colors from the framework itself. These are the
      * public android.R.color.system_* resources (API 31+), so no Shizuku/ADB lookup is
-     * needed — the gate and the main UI can use the real palette immediately.
+     * needed - the gate and the main UI can use the real palette immediately.
      */
     private void loadSystemPalettes() {
         Palette fbD = Palette.fallback(true);
@@ -881,6 +901,8 @@ public class MainActivity extends Activity {
             d.onPrimaryContainer = sysColor(android.R.color.system_on_primary_container_dark, fbD.onPrimaryContainer);
             d.secondaryContainer = sysColor(android.R.color.system_secondary_container_dark, fbD.secondaryContainer);
             d.onSecondaryContainer = sysColor(android.R.color.system_on_secondary_container_dark, fbD.onSecondaryContainer);
+            d.secondaryFixedDim = sysColor(android.R.color.system_secondary_fixed_dim, fbD.secondaryFixedDim);
+            d.onSecondaryFixed = sysColor(android.R.color.system_on_secondary_fixed, fbD.onSecondaryFixed);
             d.surface = sysColor(android.R.color.system_surface_dark, fbD.surface);
             d.onSurface = sysColor(android.R.color.system_on_surface_dark, fbD.onSurface);
             d.surfaceContainer = sysColor(android.R.color.system_surface_container_dark, fbD.surfaceContainer);
@@ -900,6 +922,8 @@ public class MainActivity extends Activity {
             l.onPrimaryContainer = sysColor(android.R.color.system_on_primary_container_light, fbL.onPrimaryContainer);
             l.secondaryContainer = sysColor(android.R.color.system_secondary_container_light, fbL.secondaryContainer);
             l.onSecondaryContainer = sysColor(android.R.color.system_on_secondary_container_light, fbL.onSecondaryContainer);
+            l.secondaryFixedDim = sysColor(android.R.color.system_secondary_fixed_dim, fbL.secondaryFixedDim);
+            l.onSecondaryFixed = sysColor(android.R.color.system_on_secondary_fixed, fbL.onSecondaryFixed);
             l.surface = sysColor(android.R.color.system_surface_light, fbL.surface);
             l.onSurface = sysColor(android.R.color.system_on_surface_light, fbL.onSurface);
             l.surfaceContainer = sysColor(android.R.color.system_surface_container_light, fbL.surfaceContainer);
@@ -918,12 +942,27 @@ public class MainActivity extends Activity {
             paletteDark = fbD;
             paletteLight = fbL;
         }
-        materialFill = paletteDark.secondaryContainer;
-        materialArrow = paletteDark.onSecondaryContainer;
-        materialFillOk = true;
-        materialArrowOk = true;
         materialRetry = 0;
         themeLoaded = true;
+        refreshMaterialColors();
+    }
+
+    /**
+     * Picks the Monet preset pair for the active theme: the dark palette's
+     * secondary container in dark mode, and the accent2 fixed-dim pair in light mode.
+     */
+    private void refreshMaterialColors() {
+        Palette src = darkMode ? paletteDark : paletteLight;
+        if (src == null) src = Palette.fallback(darkMode);
+        if (darkMode) {
+            materialFill = src.secondaryContainer;
+            materialArrow = src.onSecondaryContainer;
+        } else {
+            materialFill = src.secondaryFixedDim;
+            materialArrow = src.onSecondaryFixed;
+        }
+        materialFillOk = true;
+        materialArrowOk = true;
     }
 
     private int sysColor(int resId, int fallback) {
@@ -933,16 +972,6 @@ public class MainActivity extends Activity {
         } catch (Throwable t) {
             return fallback;
         }
-    }
-
-    private static Integer parseMaterialColor(String s) {
-        if (s == null) return null;
-        s = s.trim();
-        if (s.isEmpty()) return null;
-        if (!s.startsWith("#")) s = "#" + s;
-        Integer c = parseColor(s);
-        if (c == null) return null;
-        return 0xFF000000 | (c & 0xFFFFFF);   // Material You always starts at 100% alpha
     }
 
     /** Parse #RRGGBB or #AARRGGBB (alpha first); 6 digits default to FF alpha. */
@@ -1449,7 +1478,7 @@ public class MainActivity extends Activity {
             colorTarget = true;
         }
 
-        // Backward-compatible single-colour intent: --es hex --es target fill|arrow
+        // Legacy single-color intent: --es hex --es target fill|arrow
         if (hx != null && !hx.isEmpty()) {
             if ("arrow".equalsIgnoreCase(tg)) {
                 setSectionMode(arrowSection, false);
@@ -1467,23 +1496,15 @@ public class MainActivity extends Activity {
 
         if (hx != null || tg != null || fillExtra != null || arrowExtra != null
                 || fillMat || arrowMat || auto || cal || sp >= 0) {
-            log("intent: fill=" + (fillSection.materialMode ? "MaterialYou" : fillSection.input.getText())
-                    + " arrow=" + (arrowSection.materialMode ? "MaterialYou" : arrowSection.input.getText())
-                    + " auto=" + auto + " calibrate=" + cal + " speed=" + speedName(speed));
+            log("intent: fill=" + (fillSection.materialMode ? "Monet" : fillSection.input.getText())
+                    + " arrow=" + (arrowSection.materialMode ? "Monet" : arrowSection.input.getText())
+                    + " auto=" + auto + " calibrate=" + cal);
         }
 
         if (cal) {
             applyBtn.postDelayed(this::startCalibration, 900);
         } else if (auto) {
             applyBtn.postDelayed(this::startApply, 900);
-        }
-    }
-
-    private String safePing() {
-        try {
-            return String.valueOf(Shizuku.pingBinder());
-        } catch (Throwable t) {
-            return "err(" + t.getClass().getSimpleName() + ")";
         }
     }
 
@@ -1532,8 +1553,7 @@ public class MainActivity extends Activity {
 
         final int fc = fillColor, ac = arrowColor;
         busy = true;
-        flowSpeed = speed;   // slider applies to Apply only
-        log("Apply flow speed: " + speedName(flowSpeed));
+        flowSpeed = speed;   // the slider only affects Apply; calibration uses Normal
         log("Fill=" + colorToHex(fc) + " Arrow=" + colorToHex(ac));
         setUiBusy(true);
         step("Applying Fill and Arrow\u2026");
@@ -1561,9 +1581,7 @@ public class MainActivity extends Activity {
     private void startCalibration() {
         if (busy) return;
         busy = true;
-        flowSpeed = SPEED_NORMAL;   // calibration always uses the default preset
-        log("Calibration flow speed: " + speedName(flowSpeed)
-                + " (slider: " + speedName(speed) + ")");
+        flowSpeed = SPEED_NORMAL;   // calibration always uses the Normal preset
         setUiBusy(true);
         step("Calibrating this device\u2026");
         lastResult = "Calibration done";
@@ -1746,7 +1764,7 @@ public class MainActivity extends Activity {
      * Read a full-screen activity's view hierarchy from `dumpsys activity top`
      * (~0.2 s) instead of `uiautomator dump` (~2.5 s). Bounds in the dump are
      * relative to each parent, so offsets are accumulated down the tree.
-     * The colour picker is a dialog window, so it still uses {@link #dumpUi()}.
+     * The color picker is a dialog window, so it still uses {@link #dumpUi()}.
      */
     private List<Nd> dumpUiTop(String activityCls) throws Exception {
         checkFocus();
@@ -1891,11 +1909,11 @@ public class MainActivity extends Activity {
     }
 
     /**
-     * Detect the current animation style from the colour rows it exposes.
+     * Detect the current animation style from the color rows it exposes.
      * The app never changes the selected style; it only adapts to it.
      *   Arrow 3      -> fill_color + arrow_color
      *   Curved line  -> fill_color + arrow_color + stroke_color (outline, ignored)
-     *   Arrow 1/2    -> no colour rows at all
+     *   Arrow 1/2    -> no color rows at all
      */
     private static String detectStyle(List<Nd> ui) {
         boolean fill = byId(ui, "fill_color") != null;
@@ -1933,7 +1951,7 @@ public class MainActivity extends Activity {
     }
 
     // =====================================================================
-    // Colour maths
+    // Color maths
     // =====================================================================
     static float[] rgbToHsv(int r, int g, int b) {
         float rf = r / 255f, gf = g / 255f, bf = b / 255f;
@@ -1949,28 +1967,6 @@ public class MainActivity extends Activity {
         }
         float s = max == 0 ? 0 : d / max;
         return new float[]{h, s, max};
-    }
-
-    static int[] hsvToRgb(float h, float s, float v) {
-        float c = v * s;
-        float hp = h / 60f;
-        float x = c * (1 - Math.abs((hp % 2f) - 1));
-        float m = v - c;
-        float r = 0, g = 0, b = 0;
-        int i = (int) Math.floor(hp) % 6;
-        if (i < 0) i += 6;
-        switch (i) {
-            case 0: r = c; g = x; b = 0; break;
-            case 1: r = x; g = c; b = 0; break;
-            case 2: r = 0; g = c; b = x; break;
-            case 3: r = 0; g = x; b = c; break;
-            case 4: r = x; g = 0; b = c; break;
-            default: r = c; g = 0; b = x; break;
-        }
-        return new int[]{
-                Math.round((r + m) * 255),
-                Math.round((g + m) * 255),
-                Math.round((b + m) * 255)};
     }
 
     static int pickVpct(int r, int g, int b) {
@@ -2080,7 +2076,7 @@ public class MainActivity extends Activity {
         step("Opening " + name + " color picker\u2026");
         List<Nd> ui = dumpUiTop("SGPAnimationStyleActivity");
         Nd row = byId(ui, fill ? "fill_color" : "arrow_color");
-        if (row == null) throw new Exception(name + " colour row not found");
+        if (row == null) throw new Exception(name + " color row not found");
         Nd swatchRow = row;
         tap(row.cx(), row.cy());
         if (!waitForActivity(ACT_PICK, 6000)) log("  warning: picker not focused");
@@ -2099,7 +2095,7 @@ public class MainActivity extends Activity {
                 Nd tab = byText(ui, "Spectrum");
                 if (tab == null) tab = byText(ui, "SPECTRUM");
                 if (tab != null) {
-                    log("5) switch to Spectrum tab");
+                    log("  switch to Spectrum tab");
                     status("Selecting Spectrum\u2026");
                     tap(tab.cx(), tab.cy());
                     pause(400);
@@ -2151,7 +2147,7 @@ public class MainActivity extends Activity {
             // Brightness (drag, must be after the square tap).
             int cy = sb.cy();
             int targetX = sb.l + Math.round((sb.r - sb.l) * (vpct / 100f));
-            log("7) brightness " + vpct + "% -> x=" + targetX);
+            log("  brightness " + vpct + "% -> x=" + targetX);
             status("Setting " + name + " brightness " + vpct + "%\u2026");
             swipe(sb.r - 6, cy, targetX, cy, swipeMs(400));
             pause(250);
@@ -2161,7 +2157,7 @@ public class MainActivity extends Activity {
             if (alphaPct >= 100) {
                 resetOpacity(op);
             } else {
-                log("8) alpha " + alphaPct + "%");
+                log("  alpha " + alphaPct + "%");
                 status("Setting " + name + " alpha " + alphaPct + "%\u2026");
                 setOpacity(op, alphaPct);
                 // The Done button does not move, so the original node is still valid.
@@ -2194,7 +2190,7 @@ public class MainActivity extends Activity {
             status("Almost there \u2014 adjusting " + name + "\u2026");
 
             // Correct using achieved vs target hue/saturation (only meaningful
-            // when the swatch shows the full colour, not an alpha composite)
+            // when the swatch shows the full color, not an alpha composite)
             if (alphaPct >= 100) {
                 float[] gotHsv = rgbToHsv(got[0], got[1], got[2]);
                 float dH = H - gotHsv[0];
@@ -2208,7 +2204,7 @@ public class MainActivity extends Activity {
             // Reopen the picker for the next attempt.
             ui = dumpUiTop("SGPAnimationStyleActivity");
             Nd row2 = byId(ui, fill ? "fill_color" : "arrow_color");
-            if (row2 == null) throw new Exception(name + " colour row gone, cannot retry");
+            if (row2 == null) throw new Exception(name + " color row gone, cannot retry");
             swatchRow = row2;
             tap(row2.cx(), row2.cy());
             if (!waitForActivity(ACT_PICK, 6000)) log("  warning: picker not focused (retry)");
@@ -2216,7 +2212,7 @@ public class MainActivity extends Activity {
             pause(450);
         }
 
-        throw new Exception(name + " colour did not converge (last rgb=" +
+        throw new Exception(name + " color did not converge (last rgb=" +
                 (got == null ? "null" : got[0] + "," + got[1] + "," + got[2]) + ")");
     }
 
@@ -2295,8 +2291,8 @@ public class MainActivity extends Activity {
         addSpace(card, 12);
 
         TextView body = label(
-                "Calibration measures the colour picker layout of One Hand Operation+ "
-                        + "on this device, so OHO+ Monet can apply your colours more accurately.\n\n"
+                "Calibration measures the color picker layout of One Hand Operation+ "
+                        + "on this device, so OHO+ Monet can apply your colors more accurately.\n\n"
                         + "Calibration takes about a minute. Don't interact with the phone "
                         + "during calibration.",
                 14, pal.onSurfaceVariant, false);
@@ -2381,11 +2377,6 @@ public class MainActivity extends Activity {
     private void saveSpeed(int s) {
         getSharedPreferences(SETTINGS, MODE_PRIVATE).edit()
                 .putInt("speed", s).apply();
-        log("Speed preset: " + speedName(s));
-    }
-
-    private static String speedName(int s) {
-        return s == SPEED_SLOW ? "Slow" : s == SPEED_FAST ? "Fast" : "Normal";
     }
 
     /**
@@ -2547,7 +2538,7 @@ public class MainActivity extends Activity {
                 "   target H=90 S=0.5 -> H=%.2f S=%.3f (dH=%.2f dS=%.3f)",
                 v[0], v[1], dH, dS));
 
-        // --- discard the temporary colour
+        // --- discard the temporary color
         if (cancel != null) {
             tap(cancel.cx(), cancel.cy());
         } else {
@@ -2661,7 +2652,7 @@ public class MainActivity extends Activity {
     }
 
     /**
-     * Arrow 3 keeps its colour preview stale after the picker closes. Go back to
+     * Arrow 3 keeps its color preview stale after the picker closes. Go back to
      * Advanced and re-enter Animation to force a refresh, then return the new row.
      */
     private Nd refreshAnimationScreen(boolean fill) throws Exception {
@@ -2699,12 +2690,14 @@ public class MainActivity extends Activity {
         pause(400);
         List<Nd> ui2 = dumpUiTop("SGPAnimationStyleActivity");
         Nd row = byId(ui2, fill ? "fill_color" : "arrow_color");
-        if (row == null) throw new Exception("colour row gone on refresh");
+        if (row == null) throw new Exception("color row gone on refresh");
         return row;
     }
 
     // =====================================================================
-    /** Show a short message over whatever app is on screen (also logged). */
+    // Overlay and toasts
+    // =====================================================================
+    /** Show a short message over whatever app is on screen. */
     private void toast(String msg) {
         ui.post(() -> {
             try {

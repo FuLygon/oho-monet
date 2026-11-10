@@ -4,7 +4,7 @@
     android:height="432dp"
     android:viewportWidth="432"
     android:viewportHeight="432">
-    <!-- Monochrome (themed) icon. Same layer order as the colour foreground:
+    <!-- Monochrome (themed) icon. Same layer order as the color foreground:
          the palette is part of the themed glyph and sits behind the finger. -->
     <group>
         <clip-path
@@ -17,7 +17,7 @@
             android:fillColor="#FFFFFFFF"
             android:fillAlpha="0.8"
             android:pathData="M250.99,149.32C256.71,149.32 261.34,153.96 261.34,159.67V272.33C261.34,278.05 256.71,282.68 250.99,282.68H181.01C175.29,282.68 170.66,278.05 170.66,272.33V159.67C170.66,153.96 175.29,149.32 181.01,149.32H250.99Z" />
-        <!-- Palette glyph. Same transform as the colour foreground: centred in
+        <!-- Palette glyph. Same transform as the color foreground: centered in
              the phone screen at 87.4 px (115% of the original 76 px). -->
         <group
             android:translateX="188.03"
