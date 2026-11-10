@@ -1,8 +1,14 @@
 <h1><img src="docs/icon.png" width="42" height="42" alt="OHO+ Monet icon"> OHO+ Monet</h1>
 
-This app was made to set Monet colors (or a custom color) for One Hand Operation+ handles, support **Arrow 3** and **Curved line** styles.
+Set Monet colors (or any custom color) for One Hand Operation+ handles. Supports **Arrow 3** and **Curved line** styles.
 
-**Shizuku** is required for the app to work. The app has no internet permission.
+**Shizuku** is required for this app to work. This app has no internet permission and all data are stored locally on device.
+
+## Features
+
+- **Direct method** (default) — sets colors straight in OHO+ settings. Fast and exact.
+- **Picker method** — emulates taps on the OHO+ color picker. Slower and inaccurate, should only be used if Direct has issues on your device.
+- **Custom colors with alpha** — use `#RRGGBB` or `#AARRGGBB`.
 
 ## Screenshots
 
@@ -17,6 +23,10 @@ This app was made to set Monet colors (or a custom color) for One Hand Operation
 
 ## How it works
 
-One Hand Operation+ doesn't let you type a color code, so the app sets the colors by emulating screen taps in the OHO+ settings.
+**Direct method** reads the current OHO+ settings, changes colors, and writes them back. This method need `WRITE_SECURE_SETTINGS` permission and will be granted via **Shizuku**.
 
-Screen taps and calibration were made and tested only on a **Samsung Galaxy A55**. I can't guarantee it will work on other devices. Run the in-app **Calibration** once before applying colors.
+**Picker method** opens OHO+ and emulates taps on the color picker. Run the in-app **Calibration** at least once is recommended when using this method. Rely on **Shizuku** to emulates screen taps.
+
+Screen taps and calibration for **Picker method** was tested only on **Samsung Galaxy A55**. Other devices may work, but I can't guarantee it.
+
+Any OHO+ updates could potentially broke this app. Updates for compatibility with future OHO+ updates is not guaranteed but I'll try to update this app if I can.

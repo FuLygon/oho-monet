@@ -52,6 +52,9 @@ import android.widget.SeekBar;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import org.json.JSONArray;
+import org.json.JSONException;
+import org.json.JSONObject;
 import org.w3c.dom.Document;
 import org.w3c.dom.Element;
 import org.w3c.dom.Node;
@@ -77,19 +80,26 @@ import rikka.shizuku.Shizuku;
  * Main screen and automation engine for OHO+ Monet.
  *
  * <p>The activity renders a Material 3 Expressive interface using framework views only.
- * When the user applies a color it drives the One Hand Operation+ settings UI through
- * a shell process obtained from Shizuku, so neither root nor an accessibility service is
- * required.</p>
+ * Colors can be applied in two ways:</p>
+ * <ul>
+ *   <li><b>Direct</b> - writes the One Hand Operation+ settings through its GTS
+ *       provider. Needs a one-time {@code WRITE_SECURE_SETTINGS} grant, which is
+ *       issued through Shizuku.</li>
+ *   <li><b>Picker</b> - drives the One Hand Operation+ settings UI through a shell
+ *       process obtained from Shizuku, so neither root nor an accessibility service
+ *       is required.</li>
+ * </ul>
  *
- * <p>Automation can also be started from adb or another app with these intent extras:</p>
+ * <p>Debug builds also accept intent extras for local automation:</p>
  * <ul>
  *   <li>{@code auto} (boolean) - run the apply flow once the UI is ready</li>
  *   <li>{@code calibrate} (boolean) - run calibration instead</li>
  *   <li>{@code speed} (int) - 0 = Slow, 1 = Normal, 2 = Fast</li>
  *   <li>{@code fillMaterial} / {@code arrowMaterial} (boolean) - use the Monet preset</li>
  *   <li>{@code fill} / {@code arrow} (String) - custom #RRGGBB or #AARRGGBB color</li>
- *   <li>{@code hex} (String) with {@code target} "fill" or "arrow" - legacy single color</li>
+ *   <li>{@code hex} (String) with {@code target} "fill" or "arrow" - single color</li>
  * </ul>
+ * <p>Release builds ignore these extras.</p>
  */
 public class MainActivity extends Activity {
 
@@ -99,6 +109,15 @@ public class MainActivity extends Activity {
     static final String ACT_ADV = "SGPMoreSettingActivity";
     static final String ACT_ANIM = "SGPAnimationStyleActivity";
     static final String ACT_PICK = "SGPColorPickerActivity";
+
+    // ---- direct apply through the OHO+ GTS provider ----
+    static final String GTS_AUTHORITY = "com.samsung.android.sidegesturepad.gts.mygtscellprovider";
+    static final String GTS_URI = "content://" + GTS_AUTHORITY;
+    static final String GTS_CATEGORY = "com.samsung.android.gts.category.DEFAULT";
+    static final String PERM_WRITE_SECURE = "android.permission.WRITE_SECURE_SETTINGS";
+
+    // ---- apply method ----
+    static final int METHOD_DIRECT = 0, METHOD_PICKER = 1;
 
     // ---- spectrum square calibration (fractions of the spectrum container) ----
     // Defaults target One UI 8 on a Galaxy A55. On other devices or layouts, run
@@ -121,6 +140,8 @@ public class MainActivity extends Activity {
     private TextView applyBtn;
     private TextView calibBtn;
     private Dialog calibIntroDialog;
+    private boolean calibIntroDontShowAgain = false;
+    private Dialog resultDialog;
     private Toast currentToast;
     private TextView overlayView;
     private WindowManager overlayWm;
@@ -134,6 +155,12 @@ public class MainActivity extends Activity {
     private volatile int speed = SPEED_NORMAL;      // user setting (apply flow)
     private volatile int flowSpeed = SPEED_NORMAL;  // snapshot used by the running flow
     private volatile boolean speedHint = false;
+
+    // ---- apply method selector ----
+    private int applyMethod = METHOD_DIRECT;
+    private LinearLayout methodSeg1, methodSeg2;
+    private TextView methodText1, methodText2, methodDesc;
+    private LinearLayout speedSection;
 
     // ---- fill/arrow color sections (Monet preset vs custom) ----
     private ColorSection fillSection, arrowSection;
@@ -472,7 +499,7 @@ public class MainActivity extends Activity {
                 ViewGroup.LayoutParams.WRAP_CONTENT, dp(48)));
 
         s.input = new EditText(this);
-        s.input.setHint("#RRGGBB");
+        s.input.setHint("#AARRGGBB");
         s.input.setSingleLine(true);
         s.input.setTextSize(14);
         s.input.setInputType(InputType.TYPE_CLASS_TEXT
@@ -610,10 +637,10 @@ public class MainActivity extends Activity {
             s.customColor = c;
             s.inputError = false;
             if (!s.materialMode) updateSectionPreview(s);
-            log("Custom " + s.label + " color: " + colorToHex(c));
+            log("Custom " + s.label + ": " + colorToHex(c));
         } else {
             s.inputError = true;
-            log("Invalid custom " + s.label + " color: \"" + raw + "\"");
+            log("Invalid custom " + s.label + ": \"" + raw + "\"");
         }
         styleInput(s);
         updateApplyEnabled();
@@ -646,6 +673,110 @@ public class MainActivity extends Activity {
         boolean enabled = ok && !busy;
         applyBtn.setEnabled(enabled);
         applyBtn.setAlpha(enabled ? 1f : 0.5f);
+    }
+
+    // =====================================================================
+    // Apply method selector
+    // =====================================================================
+    private View buildMethodSelector() {
+        LinearLayout seg = new LinearLayout(this);
+        seg.setOrientation(LinearLayout.HORIZONTAL);
+        seg.setPadding(dp(2), dp(2), dp(2), dp(2));
+        seg.setBackground(outlined(Color.TRANSPARENT, pal.outline, 26, 1));
+
+        methodSeg1 = methodSegment("Direct", METHOD_DIRECT);
+        methodSeg2 = methodSegment("Picker", METHOD_PICKER);
+        seg.addView(methodSeg1, new LinearLayout.LayoutParams(0, dp(44), 1f));
+        seg.addView(methodSeg2, new LinearLayout.LayoutParams(0, dp(44), 1f));
+        styleMethodSegments();
+        return seg;
+    }
+
+    private LinearLayout methodSegment(String text, int method) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER);
+        row.setClickable(true);
+        row.setFocusable(true);
+
+        TextView t = label(text, 14, pal.onSurfaceVariant, false);
+        row.addView(t, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        row.setOnClickListener(v -> selectMethod(method));
+        if (method == METHOD_DIRECT) {
+            methodText1 = t;
+        } else {
+            methodText2 = t;
+        }
+        return row;
+    }
+
+    private void styleMethodSegment(View seg, TextView text,
+                                    boolean selected, boolean left) {
+        if (seg == null || text == null) return;
+        float r = dp(22);
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(selected ? pal.secondaryContainer : Color.TRANSPARENT);
+        bg.setCornerRadii(left
+                ? new float[]{r, r, 0, 0, 0, 0, r, r}
+                : new float[]{0, 0, r, r, r, r, 0, 0});
+        seg.setBackground(ripple(bg, withAlpha(
+                selected ? pal.onSecondaryContainer : pal.onSurface, 0.12f)));
+
+        text.setTextColor(selected ? pal.onSecondaryContainer : pal.onSurfaceVariant);
+        text.setTypeface(Typeface.create("sans-serif",
+                selected ? Typeface.BOLD : Typeface.NORMAL));
+    }
+
+    private void styleMethodSegments() {
+        boolean direct = applyMethod == METHOD_DIRECT;
+        styleMethodSegment(methodSeg1, methodText1, direct, true);
+        styleMethodSegment(methodSeg2, methodText2, !direct, false);
+    }
+
+    private void selectMethod(int method) {
+        if (applyMethod == method || busy) return;
+        applyMethod = method;
+        saveMethod(method);
+        styleMethodSegments();
+        updateMethodDescription();
+        refreshControls();
+        hideOverlay();
+        overlayAllowed = false;
+        if (method == METHOD_PICKER) {
+            logCalibrationState();
+            ui.postDelayed(this::maybeShowCalibrationIntro, 250);
+        }
+    }
+
+    private void updateMethodDescription() {
+        if (methodDesc == null) return;
+        methodDesc.setText(applyMethod == METHOD_DIRECT
+                ? "Default and recommended method. Sets colors directly in OHO+ settings. "
+                        + "Speed and Calibration are not needed."
+                : "Sets colors by emulating screen taps to change OHO+ settings. Much slower "
+                        + "and less accurate than Direct. Use only if you have issues with "
+                        + "the Direct method.");
+    }
+
+    /** Speed and calibration only matter for the Picker method. */
+    private void refreshControls() {
+        boolean direct = applyMethod == METHOD_DIRECT;
+        if (speedSection != null) {
+            speedSection.setAlpha(direct ? 0.38f : (busy ? 0.5f : 1f));
+            setEnabledDeep(speedSection, !direct && !busy);
+        }
+        if (themeToggleView != null) themeToggleView.setEnabled(!busy);
+        updateCalibrationButton();
+    }
+
+    private static void setEnabledDeep(View v, boolean enabled) {
+        v.setEnabled(enabled);
+        if (v instanceof ViewGroup) {
+            ViewGroup g = (ViewGroup) v;
+            for (int i = 0; i < g.getChildCount(); i++) setEnabledDeep(g.getChildAt(i), enabled);
+        }
     }
 
     private void hideKeyboard(View v) {
@@ -851,12 +982,7 @@ public class MainActivity extends Activity {
                 applyBtn.setEnabled(!b);
                 applyBtn.setAlpha(b ? 0.5f : 1f);
             }
-            if (calibBtn != null) {
-                calibBtn.setEnabled(!b);
-                calibBtn.setAlpha(b ? 0.5f : 1f);
-            }
-            if (speedBar != null) speedBar.setEnabled(!b);
-            if (themeToggleView != null) themeToggleView.setEnabled(!b);
+            refreshControls();
             if (!b) {
                 updateApplyEnabled();
                 if (themeRebuildPending) {
@@ -1001,6 +1127,7 @@ public class MainActivity extends Activity {
     protected void onCreate(Bundle b) {
         super.onCreate(b);
         loadSpeed();
+        loadMethod();
         loadDarkMode();
         loadSystemPalettes();
         pal = darkMode ? paletteDark : paletteLight;
@@ -1054,6 +1181,10 @@ public class MainActivity extends Activity {
         if (calibIntroDialog != null) {
             calibIntroDialog.dismiss();
             calibIntroDialog = null;
+        }
+        if (resultDialog != null) {
+            resultDialog.dismiss();
+            resultDialog = null;
         }
         super.onDestroy();
     }
@@ -1197,17 +1328,33 @@ public class MainActivity extends Activity {
 
         // Tab content: both cards, only the selected one is visible
         tabContent = new FrameLayout(this);
+        // Defaults are the stock One Hand Operation+ Arrow 3 colors, including alpha.
         fillSection = addColorSection(tabContent, "fill", "Fill color",
-                2001, 2002, "#473646");
+                2001, 2002, "#8069696C");
         arrowSection = addColorSection(tabContent, "arrow", "Arrow color",
-                3001, 3002, "#D1B8CD");
+                3001, 3002, "#B3FFFFFF");
         content.addView(tabContent);
         selectTab(selectedTab);
         addSpace(content, 24);
 
-        // Speed
-        content.addView(label("Speed", 16, pal.onSurface, true));
+        // Apply section
+        content.addView(label("Apply method", 16, pal.onSurface, true));
         addSpace(content, 8);
+        content.addView(buildMethodSelector());
+        addSpace(content, 8);
+        methodDesc = label("", 12, pal.onSurfaceVariant, false);
+        methodDesc.setLineSpacing(dp(2), 1f);
+        content.addView(methodDesc);
+        addSpace(content, 16);
+        applyBtn = pillButton("Apply", true, pal, this::startApply);
+        content.addView(applyBtn);
+        addSpace(content, 24);
+
+        // Speed & Calibration section
+        speedSection = new LinearLayout(this);
+        speedSection.setOrientation(LinearLayout.VERTICAL);
+        speedSection.addView(label("Speed & Calibration", 16, pal.onSurface, true));
+        addSpace(speedSection, 8);
         LinearLayout speedRow = new LinearLayout(this);
         speedRow.setOrientation(LinearLayout.HORIZONTAL);
         speedRow.setGravity(Gravity.CENTER_VERTICAL);
@@ -1230,20 +1377,16 @@ public class MainActivity extends Activity {
         slp.rightMargin = dp(12);
         speedRow.addView(speedBar, slp);
         speedRow.addView(label("Fast", 12, pal.onSurfaceVariant, false));
-        content.addView(speedRow);
+        speedSection.addView(speedRow);
         TextView speedNote = label(
                 "Fast may fail on some devices. If applying fails, use Normal or Slow.",
                 12, pal.onSurfaceVariant, false);
         speedNote.setLineSpacing(dp(2), 1f);
-        content.addView(speedNote);
-        addSpace(content, 24);
-
-        // Actions
-        applyBtn = pillButton("Apply", true, pal, this::startApply);
-        content.addView(applyBtn);
-        addSpace(content, 12);
+        speedSection.addView(speedNote);
+        addSpace(speedSection, 12);
         calibBtn = pillButton(calibrationButtonLabel(), false, pal, this::startCalibration);
-        content.addView(calibBtn);
+        speedSection.addView(calibBtn);
+        content.addView(speedSection);
         addSpace(content, 24);
 
         // Logs
@@ -1273,6 +1416,7 @@ public class MainActivity extends Activity {
         scroll.post(() -> logScroll.fullScroll(View.FOCUS_DOWN));
 
         updateAllPreviews();
+        updateMethodDescription();
         setUiBusy(busy);
         updateApplyEnabled();
         scroll.setAlpha(0f);
@@ -1331,8 +1475,7 @@ public class MainActivity extends Activity {
         addSpace(card, 12);
 
         TextView body = label(
-                "OHO+ Monet needs Shizuku to control your device and change "
-                        + "One Hand Operation+ settings.",
+                "OHO+ Monet needs Shizuku to apply OHO+ settings.",
                 15, pal.onSurfaceVariant, false);
         body.setGravity(Gravity.CENTER_HORIZONTAL);
         body.setLineSpacing(dp(3), 1f);
@@ -1436,6 +1579,8 @@ public class MainActivity extends Activity {
 
     private void applyIntent(Intent it) {
         if (it == null) return;
+        // These extras exist for local automation and testing only.
+        if (!BuildConfig.DEBUG) return;
         if (!mainShowing || fillSection == null || arrowSection == null) {
             pendingIntent = it;
             return;
@@ -1478,7 +1623,7 @@ public class MainActivity extends Activity {
             colorTarget = true;
         }
 
-        // Legacy single-color intent: --es hex --es target fill|arrow
+        // Debug-only single-color intent: --es hex --es target fill|arrow
         if (hx != null && !hx.isEmpty()) {
             if ("arrow".equalsIgnoreCase(tg)) {
                 setSectionMode(arrowSection, false);
@@ -1552,28 +1697,48 @@ public class MainActivity extends Activity {
         saveCustom("arrow", arrowSection.input.getText().toString());
 
         final int fc = fillColor, ac = arrowColor;
+        final int method = applyMethod;
         busy = true;
         flowSpeed = speed;   // the slider only affects Apply; calibration uses Normal
         log("Fill=" + colorToHex(fc) + " Arrow=" + colorToHex(ac));
         setUiBusy(true);
-        step("Applying Fill and Arrow\u2026");
+        applyBtn.setText("Applying\u2026");
+        if (method == METHOD_DIRECT) {
+            // Direct never shows the live progress overlay. Reset any state left
+            // over from a previous Picker run so it cannot reappear here.
+            hideOverlay();
+            overlayAllowed = false;
+        }
+        step(method == METHOD_DIRECT
+                ? "Applying colors directly\u2026"
+                : "Applying Fill and Arrow\u2026");
         lastResult = "Done";
 
         new Thread(() -> {
             try {
-                runFlow(fc, ac);
+                if (method == METHOD_DIRECT) runDirectFlow(fc, ac);
+                else runFlow(fc, ac);
             } catch (Throwable t) {
                 log("ERROR: " + t);
                 lastResult = "Failed: " + t.getMessage();
-                noteSpeedHint(t.getMessage());
+                if (method == METHOD_PICKER) noteSpeedHint(t.getMessage());
                 StackTraceElement[] st = t.getStackTrace();
                 for (int i = 0; i < Math.min(4, st.length); i++) log("  at " + st[i]);
             } finally {
-                focusApp();
-                finishOverlay(lastResult);
+                if (method == METHOD_PICKER) {
+                    focusApp();
+                    finishOverlay(lastResult);
+                } else {
+                    hideOverlay();
+                }
                 busy = false;
                 setUiBusy(false);
-                log("=== done ===");
+                log("Done");
+                final String result = lastResult;
+                ui.post(() -> {
+                    if (applyBtn != null) applyBtn.setText("Apply");
+                    showApplyResult(result);
+                });
             }
         }).start();
     }
@@ -1996,6 +2161,162 @@ public class MainActivity extends Activity {
         return false;
     }
 
+    /**
+     * Direct method: writes Fill and Arrow through the OHO+ GTS provider.
+     *
+     * <p>The current settings are read first, so only the color tags change and every
+     * other value is written back untouched. No screen is opened and no touch is
+     * injected, which is why speed and calibration are not used here.</p>
+     */
+    private void runDirectFlow(int fillColor, int arrowColor) throws Exception {
+        if (!waitForShizuku(3000)) throw new Exception("Shizuku is not running");
+        if (Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED)
+            throw new Exception("Shizuku permission not granted");
+
+        step("Preparing direct access\u2026");
+        ensureGtsPermission();
+
+        step("Reading OHO+ settings\u2026");
+        String raw = gtsReadCell();
+        JSONObject cell;
+        try {
+            cell = new JSONObject(raw);
+        } catch (JSONException e) {
+            throw new Exception("OHO+ settings could not be parsed");
+        }
+
+        JSONObject tags = gtsAnimationTags(cell);
+        String style = tags.optString("arrow_animation_style", "");
+        log("Animation style: " + styleName(style));
+
+        String detail;
+        if ("oneui_style".equals(style)) {
+            tags.put("arrow_fill_color", String.valueOf(fillColor));
+            tags.put("arrow_icon_color", String.valueOf(arrowColor));
+            detail = "Fill " + colorToHex(fillColor) + " + Arrow " + colorToHex(arrowColor);
+        } else if ("curve_style".equals(style)) {
+            int outline = outlineColor(fillColor);
+            tags.put("fluid_fill_color", String.valueOf(fillColor));
+            tags.put("fluid_arrow_color", String.valueOf(arrowColor));
+            tags.put("fluid_stroke_color", String.valueOf(outline));
+            detail = "Fill " + colorToHex(fillColor) + " + Arrow " + colorToHex(arrowColor)
+                    + " + Outline " + colorToHex(outline);
+        } else {
+            throw new Exception("Animation style \"" + styleName(style)
+                    + "\" has no Fill/Arrow color; switch to Arrow 3 or Curved line"
+                    + " (the app does not change the style)");
+        }
+
+        step("Writing colors to OHO+\u2026");
+        gtsWriteCell(cell.toString());
+
+        // Read the values back so a silent provider failure is reported.
+        JSONObject back = gtsAnimationTags(new JSONObject(gtsReadCell()));
+        if (!sameColors(tags, back, style))
+            throw new Exception("OHO+ did not keep the new colors");
+
+        lastResult = "Done \u2014 " + detail;
+    }
+
+    /**
+     * The OHO+ provider is guarded by WRITE_SECURE_SETTINGS. Shizuku can grant it
+     * once; the grant survives app updates but not a reinstall.
+     */
+    private void ensureGtsPermission() throws Exception {
+        if (checkSelfPermission(PERM_WRITE_SECURE) == PackageManager.PERMISSION_GRANTED) return;
+        log("Granting WRITE_SECURE_SETTINGS through Shizuku\u2026");
+        String out = sh("pm grant " + getPackageName() + " " + PERM_WRITE_SECURE + " 2>&1").trim();
+        if (!out.isEmpty()) log("  " + out);
+        if (checkSelfPermission(PERM_WRITE_SECURE) != PackageManager.PERMISSION_GRANTED)
+            throw new Exception("WRITE_SECURE_SETTINGS was not granted; use the Picker method");
+    }
+
+    private String gtsReadCell() throws Exception {
+        Bundle in = new Bundle();
+        in.putString("target_category", GTS_CATEGORY);
+        in.putInt("gts_action", 1);
+        ArrayList<String> keys = new ArrayList<>();
+        keys.add("key_1");
+        keys.add("key_2");
+        keys.add("key_3");
+        in.putStringArrayList("gts_item_keys", keys);
+        String cell = gtsCall("get_item", in).getString("gts_item_cell");
+        if (cell == null || cell.isEmpty()) throw new Exception("OHO+ returned no settings");
+        return cell;
+    }
+
+    private void gtsWriteCell(String json) throws Exception {
+        Bundle in = new Bundle();
+        in.putString("gts_item_cell", json);
+        in.putParcelable("finish_callback", new com.samsung.android.gtscell.RemoteCallback());
+        in.putLong("timeout", 10000L);
+        gtsCall("set_item", in);
+    }
+
+    private Bundle gtsCall(String method, Bundle in) throws Exception {
+        Bundle out;
+        try {
+            out = getContentResolver().call(Uri.parse(GTS_URI), method, null, in);
+        } catch (SecurityException e) {
+            throw new Exception("OHO+ denied the request; check the WRITE_SECURE_SETTINGS grant");
+        } catch (IllegalArgumentException e) {
+            throw new Exception("OHO+ settings provider not available; update One Hand Operation+");
+        }
+        if (out == null) throw new Exception("OHO+ did not answer");
+        return out;
+    }
+
+    /** Returns the key_2 tag map, which holds the animation style and colors. */
+    private static JSONObject gtsAnimationTags(JSONObject cell) throws Exception {
+        JSONArray items = cell.optJSONArray("items");
+        if (items != null) {
+            for (int i = 0; i < items.length(); i++) {
+                JSONObject item = items.optJSONObject(i);
+                if (item == null || !"key_2".equals(item.optString("item_key"))) continue;
+                JSONObject tags = item.optJSONObject("item_tags");
+                if (tags == null) {
+                    tags = new JSONObject();
+                    item.put("item_tags", tags);
+                }
+                return tags;
+            }
+        }
+        throw new Exception("OHO+ animation settings not found");
+    }
+
+    private static boolean sameColors(JSONObject want, JSONObject got, String style) {
+        String[] keys = "oneui_style".equals(style)
+                ? new String[]{"arrow_fill_color", "arrow_icon_color"}
+                : new String[]{"fluid_fill_color", "fluid_arrow_color", "fluid_stroke_color"};
+        for (String k : keys) {
+            if (!want.optString(k, "").equals(got.optString(k, ""))) return false;
+        }
+        return true;
+    }
+
+    private static String styleName(String style) {
+        if ("small_arrow".equals(style)) return "Arrow 1";
+        if ("big_arrow".equals(style)) return "Arrow 2";
+        if ("oneui_style".equals(style)) return "Arrow 3";
+        if ("curve_style".equals(style)) return "Curved line";
+        return style == null || style.isEmpty() ? "unknown" : style;
+    }
+
+    /**
+     * Outline color the OHO+ color picker derives from a Fill color for the Curved
+     * line style: the fill blended with a light or dark base, depending on its luma.
+     */
+    private static int outlineColor(int fill) {
+        int r = Color.red(fill), g = Color.green(fill), b = Color.blue(fill);
+        double luma = (b * 0.114d + g * 0.587d + r * 0.299d) / 255.0d;
+        int base = (1.0d - luma) < 0.5d ? 0xFF888888 : 0xFFCCCCCC;
+        int a = (int) (Color.alpha(base) * 0.2f + Color.alpha(fill) * 0.8f);
+        int rr = (int) (Color.red(base) * 0.2f + r * 0.8f);
+        int gg = (int) (Color.green(base) * 0.2f + g * 0.8f);
+        int bb = (int) (Color.blue(base) * 0.2f + b * 0.8f);
+        return Color.argb(a, rr, gg, bb);
+    }
+
     private void runFlow(int fillColor, int arrowColor) throws Exception {
         if (!waitForShizuku(3000)) throw new Exception("Shizuku is not running");
         if (Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED)
@@ -2255,9 +2576,13 @@ public class MainActivity extends Activity {
     // Calibration
     // =====================================================================
 
-    /** "Recommended" until this device has calibration data, then "Recalibrate". */
+    /** Calibration is only relevant to Picker; Direct marks it as Picker-only. */
     private String calibrationButtonLabel() {
-        return calibrated ? "Recalibrate" : "Calibrate (Recommended)";
+        boolean direct = applyMethod == METHOD_DIRECT;
+        if (calibrated) {
+            return direct ? "Recalibrate (Picker method only)" : "Recalibrate";
+        }
+        return direct ? "Calibrate (Picker method only)" : "Calibrate (Recommended)";
     }
 
     private void updateCalibrationButton() {
@@ -2265,20 +2590,28 @@ public class MainActivity extends Activity {
     }
 
     /**
-     * One-time tip about calibration. The "shown" flag is written before the
-     * dialog opens, so it appears exactly once per install even if the user
-     * dismisses it, presses Back, or never runs calibration at all.
+     * Calibration only matters for the Picker method, so the tip is shown only
+     * while Picker is selected. It stops appearing for good once the user taps
+     * "Don't show again"; a plain dismiss keeps it available next time.
      */
     private void maybeShowCalibrationIntro() {
         if (isFinishing() || !mainShowing) return;
+        if (applyMethod != METHOD_PICKER || busy) return;
         SharedPreferences sp = getSharedPreferences(SETTINGS, MODE_PRIVATE);
         if (sp.getBoolean(KEY_CALIB_INTRO_SHOWN, false)) return;
-        sp.edit().putBoolean(KEY_CALIB_INTRO_SHOWN, true).apply();
+        if (calibIntroDialog != null && calibIntroDialog.isShowing()) return;
 
         Dialog dialog = new Dialog(this);
         dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
         dialog.setCanceledOnTouchOutside(true);
-        dialog.setOnDismissListener(d -> calibIntroDialog = null);
+        calibIntroDontShowAgain = false;
+        dialog.setOnDismissListener(d -> {
+            if (calibIntroDontShowAgain) {
+                getSharedPreferences(SETTINGS, MODE_PRIVATE).edit()
+                        .putBoolean(KEY_CALIB_INTRO_SHOWN, true).apply();
+            }
+            calibIntroDialog = null;
+        });
         calibIntroDialog = dialog;
 
         LinearLayout card = new LinearLayout(this);
@@ -2300,7 +2633,10 @@ public class MainActivity extends Activity {
         card.addView(body);
         addSpace(card, 24);
 
-        card.addView(pillButton("Don't show again", true, pal, dialog::dismiss));
+        card.addView(pillButton("Don't show again", true, pal, () -> {
+            calibIntroDontShowAgain = true;
+            dialog.dismiss();
+        }));
 
         // Wrap the card so it keeps a gap from the bottom edge of the screen.
         FrameLayout sheet = new FrameLayout(this);
@@ -2330,6 +2666,78 @@ public class MainActivity extends Activity {
         }
     }
 
+    /** In-app apply result notice; this replaces the old result toast. */
+    private void showApplyResult(String result) {
+        if (isFinishing() || !mainShowing) return;
+        if (resultDialog != null) {
+            resultDialog.dismiss();
+            resultDialog = null;
+        }
+        boolean failed = result != null && result.startsWith("Failed");
+        String detail = result == null ? "" : result;
+        if (failed) {
+            if (detail.startsWith("Failed: ")) detail = detail.substring(8);
+            else if (detail.startsWith("Failed")) detail = detail.substring(6);
+        } else {
+            if (detail.startsWith("Done \u2014 ")) detail = detail.substring(7);
+            else if ("Done".equals(detail)) detail = "";
+            // One color per line, e.g. "Fill: #8069696C" / "Arrow: #B3FFFFFF".
+            detail = detail.replace(" + ", "\n")
+                    .replace("Fill ", "Fill: ")
+                    .replace("Arrow ", "Arrow: ")
+                    .replace("Outline ", "Outline: ");
+        }
+
+        Dialog dialog = new Dialog(this);
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
+        dialog.setCanceledOnTouchOutside(true);
+        dialog.setOnDismissListener(d -> resultDialog = null);
+        resultDialog = dialog;
+
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setPadding(dp(24), dp(24), dp(24), dp(20));
+        card.setBackground(rounded(pal.surfaceContainerHigh, 28));
+
+        card.addView(label(failed ? "Apply failed" : "Apply succeeded",
+                22, pal.onSurface, true));
+        addSpace(card, 10);
+
+        TextView body = label(
+                failed
+                        ? (detail.isEmpty() ? "OHO+ settings were not changed." : detail)
+                        : (detail.isEmpty() ? "Colors were set." : detail),
+                14, pal.onSurfaceVariant, false);
+        body.setLineSpacing(dp(4), 1f);
+        card.addView(body);
+        addSpace(card, 20);
+        card.addView(pillButton("OK", true, pal, dialog::dismiss));
+
+        FrameLayout sheet = new FrameLayout(this);
+        sheet.setPadding(0, 0, 0, dp(32));
+        sheet.addView(card, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        dialog.setContentView(sheet);
+        try {
+            dialog.show();
+        } catch (Throwable t) {
+            log("Result dialog could not be shown: " + t);
+            resultDialog = null;
+            return;
+        }
+        Window window = dialog.getWindow();
+        if (window != null) {
+            window.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+            int width = (int) (getResources().getDisplayMetrics().widthPixels * 0.9f);
+            window.setLayout(width, ViewGroup.LayoutParams.WRAP_CONTENT);
+            WindowManager.LayoutParams lp = window.getAttributes();
+            lp.gravity = Gravity.BOTTOM;
+            lp.dimAmount = 0.5f;
+            window.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
+            window.setAttributes(lp);
+        }
+    }
+
     private void loadCalibration() {
         SharedPreferences sp = getSharedPreferences(PREFS, MODE_PRIVATE);
         calibrated = sp.getBoolean("valid", false);
@@ -2337,6 +2745,12 @@ public class MainActivity extends Activity {
         calXH1 = sp.getFloat("hx1", (float) DEF_XH1);
         calYS0 = sp.getFloat("sy0", (float) DEF_YS0);
         calYS1 = sp.getFloat("sy1", (float) DEF_YS1);
+        // Calibration data only matters to the Picker method, so only log it there.
+        if (applyMethod == METHOD_PICKER) logCalibrationState();
+    }
+
+    private void logCalibrationState() {
+        SharedPreferences sp = getSharedPreferences(PREFS, MODE_PRIVATE);
         if (calibrated) {
             log(String.format(Locale.US,
                     "Calibration loaded: H[%.4f..%.4f] S[%.4f..%.4f] (%s)",
@@ -2377,6 +2791,18 @@ public class MainActivity extends Activity {
     private void saveSpeed(int s) {
         getSharedPreferences(SETTINGS, MODE_PRIVATE).edit()
                 .putInt("speed", s).apply();
+    }
+
+    private void loadMethod() {
+        applyMethod = getSharedPreferences(SETTINGS, MODE_PRIVATE)
+                .getInt("apply_method", METHOD_DIRECT);
+        if (applyMethod != METHOD_DIRECT && applyMethod != METHOD_PICKER)
+            applyMethod = METHOD_DIRECT;
+    }
+
+    private void saveMethod(int m) {
+        getSharedPreferences(SETTINGS, MODE_PRIVATE).edit()
+                .putInt("apply_method", m).apply();
     }
 
     /**
@@ -2781,15 +3207,15 @@ public class MainActivity extends Activity {
         });
     }
 
-    /** A user-facing step: written to the log and shown on the overlay. */
+    /** A user-facing step: written to the log and shown on the overlay when one is active. */
     private void step(String msg) {
         log(msg);
-        showOverlay(msg);
+        if (overlayAllowed) showOverlay(msg);
     }
 
     /** Transient status on the overlay, without a log line. */
     private void status(String msg) {
-        showOverlay(msg);
+        if (overlayAllowed) showOverlay(msg);
     }
 
     /** Show the final result briefly, then remove the overlay. */
